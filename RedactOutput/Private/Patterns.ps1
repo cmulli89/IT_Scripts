@@ -2,6 +2,9 @@
 
 # Fragments reused by the identifier rules (stage 2) and the residual check.
 $script:OCT  = '(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+# Key names that end in version, ver or build/buildnumber (DisplayVersion, fileversion, OSBuildNumber, AgentVer, app_ver) followed by
+# a ':' or '=' separator: the value is a version, not an address. 'ver' needs a non-letter or camel-case boundary so Server is not a key.
+$script:VersionKeyValue = '(?<!(?:version|build(?:number)?|(?<![A-Za-z])ver|(?-i:[a-z]Ver))["'']?[ \t]{0,40}[:=][ \t]{0,40}["'']?)'
 $script:GUID = '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
 
 # S04 name fragment (any name containing one of these) and the built-in deny-list.
@@ -661,7 +664,7 @@ function Get-RedactIdentifierRule {
         @{ Id = 'I07'; Label = 'ipv4'; IgnoreCase = $true; Off = ($Config['ipMode'] -eq 'Keep')
            Test = { param($m, $s) -not (Test-RedactKeepIp -Ip $m.Groups['ip'].Value -Session $s) }
            Evaluator = { param($m, $s) (Get-RedactIpToken -Ip $m.Groups['ip'].Value -Session $s) + $m.Groups['cidr'].Value }
-           Patterns = @('(?<![0-9.])(?<!(?:\bversion|\bver|\bbuild)[ \t:=]{0,3})(?<!\bv)(?<ip>(?:' + $script:OCT + '\.){3}' + $script:OCT + ')(?![0-9]|\.[0-9])(?<cidr>/(?:3[0-2]|[12]?[0-9]))?') }
+           Patterns = @('(?<![0-9.])(?<!(?:\bversion|\bver|\bbuild)[ \t:=]{0,3})' + $script:VersionKeyValue + '(?<!\bv)(?<ip>(?:' + $script:OCT + '\.){3}' + $script:OCT + ')(?![0-9]|\.[0-9])(?<cidr>/(?:3[0-2]|[12]?[0-9]))?') }
         @{ Id = 'I08'; Label = 'ipv6'; Off = ($Config['ipMode'] -eq 'Keep')
            Test = {
                param($m)

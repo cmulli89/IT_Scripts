@@ -40,6 +40,13 @@ BeforeDiscovery {
     )
     $keepCases = @(
         @{ Name = 'version strings'; Text = "build 10.0.19045.1`nversion 10.1.2.3`nVer: 192.0.2.4`nv1.2.3.4" }
+        @{ Name = 'DisplayVersion value with four valid octets'; Text = 'DisplayVersion : 10.0.190.45' }
+        @{ Name = 'Format-List padded DisplayVersion'; Text = 'DisplayVersion          : 10.0.190.45' }
+        @{ Name = 'KEY=value ProductVersion'; Text = 'ProductVersion=10.2.3.4' }
+        @{ Name = 'JSON displayVersion'; Text = '{"displayVersion": "10.0.190.45"}' }
+        @{ Name = 'OSBuildNumber'; Text = 'OSBuildNumber : 10.0.190.45' }
+        @{ Name = 'lowercase fileversion and YAML version'; Text = "fileversion: 1.2.3.4`nversion: 1.2.3.4" }
+        @{ Name = 'camel-case and snake-case ver keys'; Text = "AgentVer = 10.2.3.4`napp_ver=10.2.3.4" }
         @{ Name = 'git SHAs without certificate context'; Text = 'commit 0123456789abcdef0123456789abcdef01234567' }
         @{ Name = 'PasswordLastSet and KeyVaultName fields'; Text = "PasswordLastSet : 1/1/2024`nKeyVaultName : kv-fake" }
         @{ Name = 'timestamps'; Text = "12:34:56`n2024-01-01 09:41:07,123" }
@@ -70,6 +77,21 @@ Describe 'I01-I17 identifier rules' -Tag 'Unit' {
 
     It 'leaves <Name> untouched' -ForEach $keepCases {
         (Invoke-TestRedact -Text $Text) -ceq $Text | Should -BeTrue
+    }
+
+    It 'tokenizes the IPv4 address on <Name>' -ForEach @(
+        @{ Name = 'IPAddress key'; Text = 'IPAddress : 10.1.2.3' }
+        @{ Name = 'Server key'; Text = 'Server : 192.0.2.10' }
+        @{ Name = 'vpn word'; Text = 'vpn 10.1.2.3' }
+        @{ Name = 'version keyword earlier on the line'; Text = 'version 2 server 10.1.2.3' }
+    ) {
+        $out = Invoke-TestRedact -Text $Text
+        $out.Contains('.2.3') -or $out.Contains('.2.10') | Should -BeFalse
+        $out -match '\[ip-(priv|pub)-01\]' | Should -BeTrue
+    }
+
+    It 'raises no residual finding for version values' {
+        { "DisplayVersion          : 10.0.190.45`nProductVersion=10.2.3.4`n" | Protect-Output -NoAudit -Strict -WarningAction SilentlyContinue } | Should -Not -Throw
     }
 
     It 'tokenizes a tenant GUID in a login URL path and keeps the host' {
