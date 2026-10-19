@@ -24,7 +24,8 @@ function Write-RedactAudit {
     .DESCRIPTION
         Columns: timestamp_utc, operator, input_source, input_sha256, output_path, one column per category
         label (fixed order from the rule table), residual_findings, strict. The header is written when the
-        file is new. Never writes original values, config terms or map content.
+        file is new; when an existing file has a different header it is renamed to audit-<yyyyMMddHHmmss>.csv
+        in the same folder and a new file is started. Never writes original values, config terms or map content.
     .PARAMETER Session
         Session whose Counts and Findings are summarized.
     .PARAMETER InputSource
@@ -64,8 +65,13 @@ function Write-RedactAudit {
     $row['strict'] = [bool]$Strict
 
     $lines = @([pscustomobject]$row | ConvertTo-Csv -NoTypeInformation -UseQuotes AsNeeded)
-    if (Test-Path -LiteralPath $path) { $lines = $lines[1] }
-    else { $null = New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($path)) }
+    $folder = [System.IO.Path]::GetDirectoryName($path)
+    if (Test-Path -LiteralPath $path) {
+        # A header change (new categories) rotates the old file; only its first line is read.
+        if ((Get-Content -LiteralPath $path -TotalCount 1) -ceq $lines[0]) { $lines = $lines[1] }
+        else { Move-Item -LiteralPath $path -Destination (Join-Path $folder ('audit-{0}.csv' -f [datetime]::UtcNow.ToString('yyyyMMddHHmmss'))) }
+    }
+    else { $null = New-Item -ItemType Directory -Force -Path $folder }
     Add-Content -LiteralPath $path -Value $lines -Encoding utf8NoBOM
 }
 

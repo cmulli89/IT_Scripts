@@ -1,0 +1,12 @@
+Server health check
+  Service      : Running
+  Uptime       : 12 days
+  Build        : 10.0.19045.1
+  Endpoint     : https://graph.microsoft.us/v1.0/
+  Sign-in      : https://login.microsoftonline.us
+  Sign-up      : ENABLE_SIGNUP=false
+  Loopback     : 127.0.0.1
+  Subnet mask  : 255.255.255.0
+  Time         : 12:34:56
+  Role         : 62e90394-69f5-4237-9190-012177145e10
+  System SID   : S-1-5-18

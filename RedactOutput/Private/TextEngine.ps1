@@ -1,8 +1,7 @@
 # Redaction engine: sessions, token protection, rule application and the residual scan.
 
 # Ordered residual checks; each is called as & $check $text $session and emits { Category; Offset; Length }.
-# Stage 2 appends the config-literal and identifier checks here.
-$script:ResidualCheck = @('Get-RedactRuleResidual', 'Get-RedactEntropyResidual')
+$script:ResidualCheck = @('Get-RedactRuleResidual', 'Get-RedactEntropyResidual', 'Get-RedactLiteralResidual')
 
 #region Helpers
 
@@ -103,13 +102,19 @@ function Restore-RedactSentinel {
         [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Store
     )
 
-    $edits = foreach ($m in (Get-RedactRegex -Pattern '\uE000[\uE010-\uE01F]+\uE001\uE002*').Matches($Text)) {
-        $index = 0
-        foreach ($c in $m.Value.Substring(1).TrimEnd([char]0xE002).TrimEnd([char]0xE001).ToCharArray()) { $index = $index * 16 + [int]$c - 0xE010 }
-        [pscustomobject]@{ Start = $m.Index; Length = $m.Length; Replacement = $Store[$index] }
+    # An evaluator may build a replacement from text that still holds sentinels, so repeat (capped) until none is left.
+    $pattern = Get-RedactRegex -Pattern '\uE000[\uE010-\uE01F]+\uE001\uE002*'
+    $work = $Text
+    for ($pass = 0; $pass -lt 8; $pass++) {
+        $edits = foreach ($m in $pattern.Matches($work)) {
+            $index = 0
+            foreach ($c in $m.Value.Substring(1).TrimEnd([char]0xE002).TrimEnd([char]0xE001).ToCharArray()) { $index = $index * 16 + [int]$c - 0xE010 }
+            [pscustomobject]@{ Start = $m.Index; Length = $m.Length; Replacement = $Store[$index] }
+        }
+        if (-not $edits) { break }
+        $work = Edit-RedactText -Text $work -Edit @($edits)
     }
-    if (-not $edits) { return $Text }
-    Edit-RedactText -Text $Text -Edit @($edits)
+    $work
 }
 
 #endregion
@@ -121,8 +126,8 @@ function New-RedactSession {
     .SYNOPSIS
         Creates the per-invocation redaction session.
     .DESCRIPTION
-        Holds the merged config, the ordered rule list, per-category counts, the (stage 2) maps and
-        counters, the residual findings and the S04 deny-list.
+        Holds the merged config, the ordered rule list, per-category counts, the token maps, counters and
+        entries (Token, Type, Original), the allowlists, the residual findings and the S04 deny-list.
     .PARAMETER Config
         Merged configuration from Get-RedactConfig.
     .EXAMPLE
@@ -137,9 +142,10 @@ function New-RedactSession {
 
     $rules = [System.Collections.Generic.List[object]]::new()
     $counts = [ordered]@{}
-    foreach ($rule in @(Get-RedactSecretRule -Config $Config)) {
-        $rules.Add($rule)
-        $counts[$rule.Label] = 0
+    # Every labelled rule gets a count (so audit columns never depend on config); only enabled rules run.
+    foreach ($rule in @(Get-RedactSecretRule -Config $Config) + @(Get-RedactIdentifierRule -Config $Config)) {
+        if ($rule.Label) { $counts[$rule.Label] = 0 }
+        if ($rule.Enabled) { $rules.Add($rule) }
     }
     $deny = [System.Collections.Generic.HashSet[string]]::new([string[]]@($script:NonSecretNameSeed + @($Config['nonSecretNames'])), [System.StringComparer]::OrdinalIgnoreCase)
 
@@ -147,8 +153,10 @@ function New-RedactSession {
         Config         = $Config
         Rules          = $rules
         Counts         = $counts
-        Maps           = @{}
+        Maps           = [System.Collections.Generic.Dictionary[string, string]]::new()
         Counters       = @{}
+        Entries        = [System.Collections.Generic.List[object]]::new()
+        Allow          = Get-RedactAllowlist -Config $Config
         Findings       = [System.Collections.Generic.List[object]]::new()
         HashLike       = 0
         NonSecretNames = $deny
@@ -190,7 +198,7 @@ function Get-RedactSpan {
                 $span = if ($g.Success) { $g } else { $m }
                 # Already-redacted content (sentinels, with separators) is never redacted again.
                 if ($span.Length -eq 0 -or $skippable.IsMatch($span.Value)) { continue }
-                if ($Rule.Test -and -not (& $Rule.Test $m $Session)) { continue }
+                if ($Rule.Test -and -not (& $Rule.Test $m $Session $Rule)) { continue }
                 $found.Add([pscustomobject]@{ Start = $span.Index; Length = $span.Length; Match = $m })
             }
         }
@@ -200,6 +208,29 @@ function Get-RedactSpan {
     }
     if ($found.Count -le 1 -or $Rule.Regex.Count -eq 1) { return $found }
     Select-RedactNonOverlap -Span $found.ToArray()
+}
+
+function Invoke-RedactRule {
+    # Applies one rule to protected text. Each replacement (a secret token, or what the Evaluator returns) is stored
+    # behind a sentinel padded to the span's length, so later rules cannot match inside it and offsets stay put.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$Text,
+        [Parameter(Mandatory)][hashtable]$Rule,
+        [Parameter(Mandatory)][object]$Session,
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Store
+    )
+
+    $spans = @(Get-RedactSpan -Text $Text -Rule $Rule -Session $Session)
+    if ($spans.Count -eq 0) { return $Text }
+    $edits = foreach ($s in $spans) {
+        $index = $Store.Count
+        $Store.Add($(if ($Rule.Evaluator) { & $Rule.Evaluator $s.Match $Session } else { "[secret:$($Rule.Label)]" }))
+        [pscustomobject]@{ Start = $s.Start; Length = $s.Length; Replacement = ConvertTo-RedactSentinel -Index $index -Length $s.Length }
+    }
+    if ($Rule.Label) { $Session.Counts[$Rule.Label] += $spans.Count }
+    Edit-RedactText -Text $Text -Edit @($edits)
 }
 
 function Invoke-RedactText {
@@ -228,17 +259,7 @@ function Invoke-RedactText {
     if ([string]::IsNullOrEmpty($Text)) { return '' }
     $store = [System.Collections.Generic.List[string]]::new()
     $work = Protect-RedactToken -Text $Text -Store $store
-    foreach ($rule in $Session.Rules) {
-        $spans = @(Get-RedactSpan -Text $work -Rule $rule -Session $Session)
-        if ($spans.Count -eq 0) { continue }
-        $edits = foreach ($s in $spans) {
-            $index = $store.Count
-            $store.Add($(if ($rule.ContainsKey('Replace')) { & $rule.Replace $s.Match $Session } else { "[secret:$($rule.Label)]" }))
-            [pscustomobject]@{ Start = $s.Start; Length = $s.Length; Replacement = ConvertTo-RedactSentinel -Index $index }
-        }
-        $work = Edit-RedactText -Text $work -Edit @($edits)
-        $Session.Counts[$rule.Label] += $spans.Count
-    }
+    foreach ($rule in $Session.Rules) { $work = Invoke-RedactRule -Text $work -Rule $rule -Session $Session -Store $store }
     Restore-RedactSentinel -Text $work -Store $store
 }
 
@@ -262,16 +283,44 @@ function Get-RedactEntropy {
 }
 
 function Get-RedactRuleResidual {
-    # Every mutating rule in detect-only mode.
+    # Every mutating rule in detect-only mode. Mask rules still apply, so allowlisted spans are hidden from later rules.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Text,
         [Parameter(Mandatory)][object]$Session
     )
 
+    $store = [System.Collections.Generic.List[string]]::new()
+    $work = $Text
     foreach ($rule in $Session.Rules) {
-        foreach ($s in @(Get-RedactSpan -Text $Text -Rule $rule -Session $Session)) {
+        if ($rule.Kind -eq 'mask') { $work = Invoke-RedactRule -Text $work -Rule $rule -Session $Session -Store $store; continue }
+        foreach ($s in @(Get-RedactSpan -Text $work -Rule $rule -Session $Session)) {
             [pscustomobject]@{ Category = $rule.Label; Offset = $s.Start; Length = $s.Length }
+        }
+    }
+}
+
+function Get-RedactLiteralResidual {
+    # Config literals (internal domains, NetBIOS names, host names, users, extra terms) still present, as a plain
+    # case-insensitive substring search. The category is the config key; the value is never reported.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Text,
+        [Parameter(Mandatory)][object]$Session
+    )
+
+    $literal = [ordered]@{
+        internalDomains = @(Get-RedactConfigList -Config $Session.Config -Key 'internalDomains')
+        netbiosDomains  = @(Get-RedactConfigList -Config $Session.Config -Key 'netbiosDomains' | ForEach-Object { $_['netbios'] })
+        hostList        = @(Get-RedactConfigList -Config $Session.Config -Key 'hostList')
+        usernames       = @(Get-RedactConfigList -Config $Session.Config -Key 'usernames')
+        extraTerms      = @(Get-RedactConfigList -Config $Session.Config -Key 'extraTerms' | ForEach-Object { $_['term'] })
+    }
+    foreach ($key in $literal.Keys) {
+        $alternation = Get-RedactAlternation -Term $literal[$key]
+        if (-not $alternation) { continue }
+        foreach ($m in (Get-RedactRegex -Pattern $alternation -IgnoreCase).Matches($Text)) {
+            [pscustomobject]@{ Category = $key; Offset = $m.Index; Length = $m.Length }
         }
     }
 }

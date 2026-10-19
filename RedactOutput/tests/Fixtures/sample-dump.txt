@@ -1,0 +1,64 @@
+PS C:\Users\jdoe.CONTOSO> ipconfig /all
+
+Windows IP Configuration
+
+   Host Name . . . . . . . . . . . . : WS-1234
+   Primary Dns Suffix  . . . . . . . : ad.contoso.example
+
+Ethernet adapter Ethernet:
+
+   Connection-specific DNS Suffix  . : ad.contoso.example
+   Physical Address. . . . . . . . . : 00-15-5D-01-02-03
+   IPv4 Address. . . . . . . . . . . : 10.20.30.40(Preferred)
+   Subnet Mask . . . . . . . . . . . : 255.255.255.0
+   Default Gateway . . . . . . . . . : 10.20.30.1
+   DNS Servers . . . . . . . . . . . : 10.20.30.5
+                                       198.51.100.53
+   Link-local IPv6 Address . . . . . : fe80::1c2b:3d4e:5f60:7182%12
+
+PS C:\Users\jdoe.CONTOSO> whoami /all
+
+USER INFORMATION
+User Name     SID
+============= ==============================================
+contoso\jdoe  S-1-5-21-1111111111-2222222222-3333333333-1104
+
+GROUP INFORMATION
+Group Name              Type             SID
+======================= ================ ==============================================
+Everyone                Well-known group S-1-1-0
+BUILTIN\Administrators  Alias            S-1-5-32-544
+CONTOSO\Domain Users    Group            S-1-5-21-1111111111-2222222222-3333333333-513
+NT AUTHORITY\SYSTEM     Well-known group S-1-5-18
+
+PS C:\> Get-ADUser -Identity CONTOSO\jdoe | Format-List DistinguishedName, UserPrincipalName
+
+DistinguishedName : CN=John Doe,OU=Staff,DC=ad,DC=contoso,DC=example
+UserPrincipalName : jdoe@contoso.example
+
+PS C:\> Get-ChildItem \\WS-1234\data
+
+Mode   LastWriteTime        Length Name
+----   -------------        ------ ----
+-a---- 1/15/2025 9:41 AM       512 notes.txt
+
+Resource and connection details
+  Vault   : /subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-contoso-prod/providers/Microsoft.KeyVault/vaults/kv-contoso-main
+  Region  : usgovvirginia
+  Sql     : Server=tcp:sql-contoso-01.database.usgovcloudapi.net,1433;Database=app;User Id=svc-example;Password=FakePassw0rd01;
+  Graph   : https://graph.microsoft.us/v1.0/users/jane.doe@contoso.example
+  Auth    : Authorization: Bearer eyJhbGciOiJub25lIn0.eyJzdWIiOiJmYWtlLXN1YmplY3QifQ.ZmFrZS1zaWduYXR1cmU
+  Authority: https://login.microsoftonline.us/11111111-2222-3333-4444-555555555555/oauth2/v2.0/token
+  Signup  : ENABLE_SIGNUP=false
+
+{
+  "id": "11111111-2222-3333-4444-555555555555",
+  "displayName": "Jane Doe",
+  "givenName": "Jane",
+  "surname": "Doe",
+  "userPrincipalName": "jane.doe@tenant.onmicrosoft.us",
+  "mobilePhone": "+1 555 0100",
+  "businessPhones": ["+1 555 0101"],
+  "employeeId": "E12345",
+  "appId": "00000003-0000-0000-c000-000000000000"
+}

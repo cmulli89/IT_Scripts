@@ -12,12 +12,12 @@ BeforeDiscovery {
         @{ Name = 'S01 pem-key'; Label = 'pem-key'; Text = "before`n$begin`nFAKEFAKE0000`nFAKEFAKE1111`n$end`nafter"; Secret = 'FAKEFAKE0000'; Keep = @('before', 'after') }
         @{ Name = 'S16 dpapi'; Label = 'dpapi'; Text = "blob: 01000000d08c9ddf0115d1118c7a00c04fc297eb$hex64"; Secret = $hex64; Keep = @('blob: ') }
         @{ Name = 'S02 jwt'; Label = 'jwt'; Text = "jwt text $jwt end"; Secret = 'ZmFrZS1zaWduYXR1cmU'; Keep = @('jwt text ', ' end') }
-        @{ Name = 'S07 url-cred (user:pass)'; Label = 'url-cred'; Text = 'url postgresql://appuser:FakePassw0rd@db.contoso.example:5432/x'; Secret = 'FakePassw0rd'; Keep = @('postgresql://', '@db.contoso.example:5432/x') }
-        @{ Name = 'S07 url-cred (token-only userinfo)'; Label = 'url-cred'; Text = 'clone https://AbCdEfGhIjKlMnOpQrStUvWx@dev.contoso.example/repo.git'; Secret = 'AbCdEfGhIjKlMnOpQrStUvWx'; Keep = @('https://', '@dev.contoso.example/repo.git') }
+        @{ Name = 'S07 url-cred (user:pass)'; Label = 'url-cred'; Text = 'url postgresql://appuser:FakePassw0rd@db.contoso.example:5432/x'; Secret = 'FakePassw0rd'; Keep = @('postgresql://', '@[host-01].[domain-01]:5432/x') }
+        @{ Name = 'S07 url-cred (token-only userinfo)'; Label = 'url-cred'; Text = 'clone https://AbCdEfGhIjKlMnOpQrStUvWx@dev.contoso.example/repo.git'; Secret = 'AbCdEfGhIjKlMnOpQrStUvWx'; Keep = @('https://', '@[host-01].[domain-01]/repo.git') }
         @{ Name = 'S03 auth-header (Bearer)'; Label = 'auth-header'; Text = 'Authorization: Bearer abcdefghij0123456789ABCDEF'; Secret = 'abcdefghij0123456789ABCDEF'; Keep = @('Authorization: Bearer ') }
         @{ Name = 'S03 auth-header (Proxy Basic)'; Label = 'auth-header'; Text = 'Proxy-Authorization: Basic dXNlcjpGYWtlUGFzcw=='; Secret = 'dXNlcjpGYWtlUGFzcw'; Keep = @('Proxy-Authorization: Basic ') }
         @{ Name = 'S03 auth-header (bare Bearer)'; Label = 'auth-header'; Text = 'sent Bearer abcdefghij0123456789ABCDEF today'; Secret = 'abcdefghij0123456789ABCDEF'; Keep = @('sent Bearer ', ' today') }
-        @{ Name = 'S05 connstr (Password)'; Label = 'connstr'; Text = 'Server=tcp:db.contoso.example;Database=app;Password=FakePassw0rd;User Id=app'; Secret = 'FakePassw0rd'; Keep = @('Server=tcp:db.contoso.example;Database=app;Password=', ';User Id=app') }
+        @{ Name = 'S05 connstr (Password)'; Label = 'connstr'; Text = 'Server=tcp:db.contoso.example;Database=app;Password=FakePassw0rd;User Id=app'; Secret = 'FakePassw0rd'; Keep = @('Server=tcp:[host-01].[domain-01];Database=app;Password=', ';User Id=app') }
         @{ Name = 'S05 connstr (AccountKey)'; Label = 'connstr'; Text = "DefaultEndpointsProtocol=https;AccountName=fakeacct;AccountKey=$storageKey;EndpointSuffix=core.usgovcloudapi.net"; Secret = 'A1b2C3d4A1b2'; Keep = @('AccountName=fakeacct;AccountKey=', ';EndpointSuffix=core.usgovcloudapi.net') }
         @{ Name = 'S06 sas-sig'; Label = 'sas-sig'; Text = 'https://fakeacct.blob.core.usgovcloudapi.net/c/b?sv=2020-08-04&sp=r&se=2030-01-01T00%3A00%3A00Z&st=2020-01-01&sig=FAKE%2Bsig%2Fvalue%3D'; Secret = 'FAKE%2Bsig'; Keep = @('sv=2020-08-04', 'sp=r', 'se=2030-01-01T00%3A00%3A00Z', 'st=2020-01-01', '&sig=') }
         @{ Name = 'S11 git-token (GitLab)'; Label = 'git-token'; Text = 'glab glpat-abcdefghij0123456789 end'; Secret = 'abcdefghij0123456789'; Keep = @('glab ', ' end') }
@@ -73,8 +73,8 @@ Describe 'S01-S16 secret rules' -Tag 'Unit' {
     }
 
     It 'S07 leaves ssh://git@host untouched' {
-        $text = 'git clone ssh://git@git.contoso.example/team/repo.git'
-        (Invoke-TestRedact -Text $text) -ceq $text | Should -BeTrue
+        $out = Invoke-TestRedact -Text 'git clone ssh://git@git.contoso.example/team/repo.git'
+        $out | Should -BeExactly 'git clone ssh://git@[domain-01]/team/repo.git'
     }
 
     It 'S15 never touches a bare 32-hex value' {
@@ -149,7 +149,7 @@ Describe 'S04 secret-named key/value' -Tag 'Unit' {
 }
 
 Describe 'bash redact() fixture' -Tag 'Unit' {
-    It 'redacts the env fixture and leaves ENABLE_SIGNUP and WEBUI_URL alone' {
+    It 'redacts the env fixture, leaves ENABLE_SIGNUP alone and tokenizes the internal WEBUI_URL host' {
         $text = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Fixtures/bash-env.env') -Raw
         $out = Invoke-TestRedact -Text $text.TrimEnd()
         foreach ($v in 'FAKEFAKEFAKEFAKEFAKE01', 'FakeSecretValue0123', 'FakePassw0rd', 'FakeOauthValue0123', 'FakeLowerCaseValue0123') {
@@ -162,7 +162,7 @@ Describe 'bash redact() fixture' -Tag 'Unit' {
             'OAUTH_CLIENT_SECRET=[secret:kv]'
             'openai_api_key=[secret:kv]'
             'ENABLE_SIGNUP=false'
-            'WEBUI_URL=https://chat.contoso.example'
+            'WEBUI_URL=https://[host-01].[domain-01]'
         ) -join "`n"
         $out -ceq $expected | Should -BeTrue
     }
@@ -184,7 +184,7 @@ Describe 'S17 high-entropy residual' -Tag 'Unit' {
     }
 
     It 'counts GUID and 32/40/64-hex values as hash-like, not as findings' {
-        $text = "11111111-2222-3333-4444-555555555555`n31d6cfe0d16ae931b73c59d7e0c089c0`n" + ('a1b2c3d4e5' * 4) + "`n" + ('a1b2c3d4e5f60718' * 4)
+        $text = "00000000-0000-0000-0000-000000000000`n31d6cfe0d16ae931b73c59d7e0c089c0`n" + ('a1b2c3d4e5' * 4) + "`n" + ('a1b2c3d4e5f60718' * 4)
         @($text | Test-RedactionResidual).Count | Should -Be 0
         InModuleScope RedactOutput -Parameters @{ Text = $text } {
             $s = New-RedactSession -Config (Get-RedactConfig)
@@ -332,7 +332,7 @@ Describe 'Audit log' -Tag 'Unit' {
         $null = 'token=FakeValue25' | Protect-Output -AuditPath $audit -Strict
         $raw = Get-Content -LiteralPath $audit
         $raw.Count | Should -Be 3
-        $labels = InModuleScope RedactOutput { (Get-RedactSecretRule).Label }
+        $labels = InModuleScope RedactOutput { (New-RedactSession -Config (Get-RedactConfig)).Counts.Keys }
         $expected = @('timestamp_utc', 'operator', 'input_source', 'input_sha256', 'output_path') + $labels + @('residual_findings', 'strict')
         $rows = Import-Csv -LiteralPath $audit
         $rows.Count | Should -Be 2

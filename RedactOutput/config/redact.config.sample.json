@@ -1,9 +1,68 @@
 {
-  "_comment": "Committed sample: placeholders and comments only. Copy your real values into redact.config.local.json (git-ignored). Keys starting with an underscore are ignored.",
+  "_comment": "Committed sample: placeholders and comments only. Copy your real values into redact.config.local.json (git-ignored). Keys starting with an underscore are ignored. Layering, lowest to highest: built-in defaults, this sample, local file, -ConfigPath, parameters. Arrays and scalars replace lower layers; categories merges key by key. Built-in allowlists (endpoints, GUIDs, IPs, SIDs) cannot be removed.",
+
+  "internalDomains": ["ad.contoso.example", "contoso.example"],
+  "_internalDomains_comment": "Your AD and UPN domains, for example the forest root and the email domain. Subdomains are included. Used for host.domain names, DC= distinguished names and the residual check.",
+
+  "netbiosDomains": [
+    { "netbios": "CONTOSO", "fqdn": "ad.contoso.example", "_comment": "NetBIOS (pre-Windows 2000) domain name and its FQDN. Both get one domain token, so CONTOSO\\user and user@ad.contoso.example correlate." }
+  ],
+
+  "hostPatterns": [
+    { "regex": "WS-[0-9]{3,}", "minLength": 6, "_comment": "Desktop naming pattern. Matches shorter than minLength are ignored; without a digit class minLength must be 4 or more." },
+    { "regex": "LT-[0-9]{3,}", "minLength": 6, "_comment": "Laptop naming pattern." },
+    { "regex": "SRV-[A-Z]{2,4}[0-9]{2,}", "minLength": 7, "_comment": "Server naming pattern." },
+    { "regex": "VM-[0-9]{3,}", "minLength": 5, "_comment": "Virtual machine naming pattern." },
+    { "regex": "dkr-[0-9]{2,}", "minLength": 6, "_comment": "Linux Docker host naming pattern." }
+  ],
+  "_hostPatterns_comment": "Regexes for workstation, laptop, server, VM and Linux host names. Matched case-insensitively as whole words. Nested quantifiers such as (a+)+ are rejected.",
+
+  "hostList": ["host-placeholder"],
+  "_hostList_comment": "Exact host names that do not follow a pattern. One-off servers, appliances, lab machines.",
+
+  "resourcePrefixes": ["rg-contoso-", "kv-contoso-", "st-contoso"],
+  "_resourcePrefixes_comment": "Azure resource group and resource naming prefixes. A bare name starting with one becomes [res-NN]; names starting with rg- become [rg-NN].",
+
+  "usernames": ["svc-example"],
+  "_usernames_comment": "Explicit user or service account names to map, for example service accounts that appear without a domain.",
+
+  "extraTerms": [
+    { "term": "Project Placeholder", "label": "proj", "_comment": "A project or program name. The label (letters and digits) becomes the token type: [term-proj-01]." },
+    { "term": "Building 7", "label": "site", "_comment": "A site or building name." },
+    { "term": "CTR-0000", "label": "contract", "_comment": "A contract number or part-number prefix." }
+  ],
+  "_extraTerms_comment": "Project or program names, contract numbers, site or building names, part-number prefixes. Matched case-insensitively as whole words.",
+
+  "guidAllowlist": [],
+  "_guidAllowlist_comment": "GUIDs to keep verbatim, for example Intune setting-definition, CSP or ADMX GUIDs. Never list tenant, subscription, object or device IDs. Bulk lists go in guid-allowlist.txt.",
+
+  "publicHostAllowlist": [],
+  "_publicHostAllowlist_comment": "Extra public endpoints to keep readable. An entry like *.example.net matches subdomains on a label boundary; a plain entry matches exactly.",
+
+  "publicDomains": [],
+  "_publicDomains_comment": "Extra public email domains (kept in addresses; the local part is still mapped). Subdomains are included.",
+
+  "ipAllowlist": [],
+  "_ipAllowlist_comment": "IP addresses to keep verbatim, for example a public DNS resolver.",
+
+  "ipMode": "Classify",
+  "_ipMode_comment": "Classify (private -> ip-priv, public -> ip-pub), KeepPrivate (private addresses stay readable) or Keep (IPv4 and IPv6 off).",
+
+  "pathMode": "UserOnly",
+  "_pathMode_comment": "UserOnly (profile folder names), Full (every folder except well-known system folders) or Keep (profile path rule off).",
+
+  "sidKeepRid": true,
+  "_sidKeepRid_comment": "true keeps the RID: S-1-5-21-[sid-dom-NN]-512. false replaces the whole SID with [sid-dom-NN].",
+
+  "categories": {},
+  "_categories_comment": "Per-category on/off, merged key by key over lower layers. Keys: guid, sid, upn, tenant, fqdn, host, ipv4, ipv6, mac, azure-resource, azure-host, thumbprint, unc, profile-path, domain-user, person, extra-term. Secret categories cannot be disabled.",
+
   "secretNames": [],
   "_secretNames_comment": "Extra key/property names whose values are secrets (S04), added to the built-in list. Example: [\"badge_pin\"].",
+
   "nonSecretNames": [],
   "_nonSecretNames_comment": "Names that contain a secret-like word but are not secret (S04 deny-list), added to the built-in list. Compared case-insensitively on the exact name. Example: [\"KeyRotationDays\"].",
-  "categories": {},
-  "_categories_comment": "Per-category on/off switches, merged key by key over lower layers. Secret categories cannot be disabled."
+
+  "deviceSerialPatterns": ["PF[0-9][A-Z0-9]{5,}"],
+  "_deviceSerialPatterns_comment": "Regexes for device serial numbers that appear without a Serial label, for example a laptop vendor's serial format. Replaced with [serial-NN]. Same safety checks as hostPatterns."
 }
