@@ -38,7 +38,7 @@ Describe 'Static checks' -Tag 'Static' {
 
     It 'exports exactly the manifest functions and the redact alias' {
         $module = Get-Module RedactOutput
-        ($module.ExportedFunctions.Keys | Sort-Object) -join ',' | Should -Be 'Get-RedactionMap,Protect-Output,Restore-RedactedText,Test-RedactionResidual'
+        ($module.ExportedFunctions.Keys | Sort-Object) -join ',' | Should -Be 'Get-RedactionMap,Invoke-RedactedCommand,New-RedactionConfig,Protect-Output,Restore-RedactedText,Test-RedactionResidual'
         (Get-Alias redact).Definition | Should -Be 'Protect-Output'
     }
 

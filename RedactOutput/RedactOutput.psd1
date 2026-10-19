@@ -1,6 +1,6 @@
 @{
     RootModule            = 'RedactOutput.psm1'
-    ModuleVersion         = '0.1.0'
+    ModuleVersion         = '1.0.0'
     GUID                  = 'ca02221e-5a85-4b40-9c47-bf0e9165d9ca'
     Author                = 'Carl'
     Description           = 'Redact secrets and environment identifiers from text (script output, JSON, logs, .env files) before it leaves the security boundary, for example before pasting into a commercial AI chat. Secrets become [secret:type] tokens; identifiers become stable [type-NN] tokens.'
@@ -8,9 +8,11 @@
     CompatiblePSEditions  = @('Core')
     FunctionsToExport     = @(
         'Protect-Output',
+        'Invoke-RedactedCommand',
         'Test-RedactionResidual',
         'Restore-RedactedText',
-        'Get-RedactionMap'
+        'Get-RedactionMap',
+        'New-RedactionConfig'
     )
     CmdletsToExport       = @()
     VariablesToExport     = @()

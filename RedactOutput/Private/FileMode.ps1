@@ -104,6 +104,32 @@ function Get-RedactFilePlan {
 
 #region One file
 
+function New-RedactResult {
+    # The RedactOutput.Result for one input: only categories that matched are in Counts.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Builds an in-memory object only.')]
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [string]$Path,
+        [string]$OutPath,
+        [Parameter(Mandatory)][string]$DetectedType,
+        [Parameter(Mandatory)][string]$Encoding,
+        [Parameter(Mandatory)][object]$Session
+    )
+
+    $counts = [ordered]@{}
+    foreach ($label in $Session.Counts.Keys) { if ($Session.Counts[$label] -gt 0) { $counts[$label] = $Session.Counts[$label] } }
+    [pscustomobject]@{
+        PSTypeName       = 'RedactOutput.Result'
+        Path             = $Path
+        OutPath          = $OutPath
+        DetectedType     = $DetectedType
+        Encoding         = $Encoding
+        Counts           = $counts
+        ResidualWarnings = $Session.Findings.Count
+    }
+}
+
 function Invoke-RedactFile {
     <#
     .SYNOPSIS
@@ -195,17 +221,7 @@ function Invoke-RedactFile {
     }
     finally { if ($temp -and (Test-Path -LiteralPath $temp)) { Remove-Item -LiteralPath $temp -Force } }
 
-    $counts = [ordered]@{}
-    foreach ($label in $Session.Counts.Keys) { if ($Session.Counts[$label] -gt 0) { $counts[$label] = $Session.Counts[$label] } }
-    [pscustomobject]@{
-        PSTypeName       = 'RedactOutput.Result'
-        Path             = $path
-        OutPath          = $Entry.OutPath
-        DetectedType     = $type
-        Encoding         = $file.Encoding.WebName + $(if ($file.HasBom) { ' (BOM)' })
-        Counts           = $counts
-        ResidualWarnings = $Session.Findings.Count
-    }
+    New-RedactResult -Path $path -OutPath $Entry.OutPath -DetectedType $type -Encoding ($file.Encoding.WebName + $(if ($file.HasBom) { ' (BOM)' })) -Session $Session
 }
 
 #endregion

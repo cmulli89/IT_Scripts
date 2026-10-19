@@ -7,6 +7,11 @@ function Protect-Output {
         Pipeline input (or -InputObject) is collected, rendered with Out-String -Width 4096 (or, with -As Json,
         ConvertTo-Json -Depth 100 and the JSON handler), redacted as one block and emitted as a single string.
 
+        -Clipboard reads the clipboard as text, redacts it and puts the result back (Linux needs xclip or
+        wl-clipboard; an empty or non-text clipboard is an error). -Preview prints the redacted text with tokens
+        highlighted (secrets red, identifiers cyan) and writes nothing at all: no output, clipboard, map or audit
+        row. Both work on pipeline and clipboard input; -OutFile also writes that text to a file.
+
         -Path (wildcards) and -LiteralPath redact files with the handler for their type (json, jsonl, csv, tsv, xml,
         keyvalue, reg, script, html, text), keeping encoding, BOM and each line's own terminator. A folder is
         processed file by file (-Recurse, -Include); binary files, *.redacted.* files and links are skipped. The
@@ -27,6 +32,12 @@ function Protect-Output {
     .PARAMETER InputObject
         Text or objects to redact; accepts pipeline input. Strings are joined with newlines.
 
+    .PARAMETER Clipboard
+        Redact the clipboard text in place instead of pipeline input.
+
+    .PARAMETER Preview
+        Print the redacted text with highlighted tokens and write nothing. Skim it before pasting.
+
     .PARAMETER Path
         File or folder to redact; wildcards allowed.
 
@@ -46,13 +57,14 @@ function Protect-Output {
         Folder for output files (the folder structure below a given folder is kept).
 
     .PARAMETER OutFile
-        Output file for a single input file.
+        Output file for a single input file, or for the redacted text of pipeline or clipboard input.
 
     .PARAMETER Force
         Overwrite an existing output file.
 
     .PARAMETER PassThru
-        Emit one RedactOutput.Result per file (Path, OutPath, DetectedType, Encoding, Counts, ResidualWarnings).
+        Emit one RedactOutput.Result per file (Path, OutPath, DetectedType, Encoding, Counts, ResidualWarnings), or
+        one for pipeline or clipboard input whose text went to the clipboard or -OutFile.
 
     .PARAMETER Encoding
         Forces the encoding for reading and writing a file (UTF8, Unicode, BigEndianUnicode, UTF32,
@@ -95,19 +107,27 @@ function Protect-Output {
         Get-Something | redact -MapPath .\session1.redactmap.json
 
     .EXAMPLE
+        redact -Clipboard -Preview
+
+    .EXAMPLE
+        redact -Clipboard
+
+    .EXAMPLE
         redact -Path .\dump.json -PassThru
 
     .EXAMPLE
         redact -Path .\logs -Recurse -Include *.log,*.json -OutDir .\redacted -WhatIf
 
     .OUTPUTS
-        System.String for pipeline input; RedactOutput.Result with -PassThru for files.
+        System.String for pipeline input; RedactOutput.Result with -PassThru for files, clipboard or -OutFile output.
     #>
     [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Pipeline')]
     [OutputType([string])]
     [OutputType('RedactOutput.Result')]
     param(
         [Parameter(ValueFromPipeline, ParameterSetName = 'Pipeline')][AllowNull()][object]$InputObject,
+        [Parameter(Mandatory, ParameterSetName = 'Clipboard')][switch]$Clipboard,
+        [Parameter(ParameterSetName = 'Pipeline')][Parameter(ParameterSetName = 'Clipboard')][switch]$Preview,
         [Parameter(Mandatory, Position = 0, ParameterSetName = 'Path')][string[]]$Path,
         [Parameter(Mandatory, ParameterSetName = 'LiteralPath')][Alias('PSPath')][string[]]$LiteralPath,
         [Parameter(ParameterSetName = 'Pipeline')][ValidateSet('Text', 'Json')][string]$As = 'Text',
@@ -133,11 +153,10 @@ function Protect-Output {
     process { if ($null -ne $InputObject) { $items.Add($InputObject) } }
 
     end {
-        $fileMode = $PSCmdlet.ParameterSetName -ne 'Pipeline'
-        if (-not $fileMode -and $items.Count -eq 0) { return }
-        $session = New-RedactSession -Config (Get-RedactConfig -ConfigPath $ConfigPath)
-        $mapFile = if ($MapPath) { Resolve-RedactMapPath -MapPath $MapPath }
-        if ($mapFile -and (Test-Path -LiteralPath $mapFile)) { Import-RedactMap -Session $session -Path $mapFile }
+        $fileMode = $PSCmdlet.ParameterSetName -in 'Path', 'LiteralPath'
+        if ($PSCmdlet.ParameterSetName -eq 'Pipeline' -and $items.Count -eq 0) { return }
+        $run = Initialize-RedactRun -ConfigPath $ConfigPath -MapPath $MapPath
+        $session = $run.Session
 
         if ($fileMode) {
             $plan = Get-RedactFilePlan -Path $Path -LiteralPath $LiteralPath -Recurse:$Recurse -Include $Include -OutDir $OutDir -OutFile $OutFile
@@ -153,28 +172,17 @@ function Protect-Output {
                 $result = Invoke-RedactFile -Entry $entry -Session $session -SkipBinary:($entry.Folder -or $plan.Count -gt 1) @fileOption
                 if ($PassThru -and $result) { $result }
             }
-            if ($mapFile -and $PSCmdlet.ShouldProcess($mapFile, 'Write map file')) { Save-RedactMap -Session $session -Path $mapFile }
+            if ($run.MapFile -and $PSCmdlet.ShouldProcess($run.MapFile, 'Write map file')) { Save-RedactMap -Session $session -Path $run.MapFile }
             return
         }
 
         $type = if ($As -eq 'Json') { 'json' } else { 'text' }
-        $text = if ($As -eq 'Json') { ConvertTo-Json -InputObject $(if ($items.Count -eq 1) { $items[0] } else { $items.ToArray() }) -Depth 100 }
+        $text = if ($Clipboard) { Get-RedactClipboard }
+        elseif ($As -eq 'Json') { ConvertTo-Json -InputObject $(if ($items.Count -eq 1) { $items[0] } else { $items.ToArray() }) -Depth 100 }
         elseif (@($items | Where-Object { $_ -isnot [string] }).Count -eq 0) { $items -join "`n" }
         else { ($items | Out-String -Width 4096).TrimEnd() }
         $text = Select-RedactLine -Text $text -Type $type -Head $Head -Tail $Tail
-
-        $redacted = Invoke-RedactContent -Text $text -Type $type -Session $session
-        [void](Find-RedactResidual -Text $redacted -Session $session)
-        Confirm-RedactFinding -Session $session -Strict:$Strict
-
-        if (-not $PSCmdlet.ShouldProcess('redaction result', 'Emit redacted text and write audit row')) {
-            Write-RedactSummary -Session $session
-            return
-        }
-        if ($mapFile -and $PSCmdlet.ShouldProcess($mapFile, 'Write map file')) { Save-RedactMap -Session $session -Path $mapFile }
-        if (-not $NoAudit) {
-            Write-RedactAudit -Session $session -InputSource pipeline -InputSha256 (Get-RedactSha256 -Text $text) -Strict:$Strict -AuditPath $AuditPath
-        }
-        $redacted
+        Invoke-RedactTextRun -Cmdlet $PSCmdlet -Text $text -Type $type -Session $session -InputSource $(if ($Clipboard) { 'clipboard' } else { 'pipeline' }) `
+            -Clipboard:$Clipboard -OutFile $OutFile -Force:$Force -Preview:$Preview -MapFile $run.MapFile -Strict:$Strict -NoAudit:$NoAudit -AuditPath $AuditPath -PassThru:$PassThru
     }
 }

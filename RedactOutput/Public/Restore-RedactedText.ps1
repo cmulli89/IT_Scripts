@@ -11,10 +11,14 @@ function Restore-RedactedText {
         are restored with the casing first seen. [secret:...] tokens
         stay as they are (secrets are never in a map); their count is reported with Write-Verbose. Text is returned, or written to -OutputPath (a file input keeps
         its encoding, BOM and line endings). An existing output file needs -Force and the input is never
-        overwritten. -WhatIf writes nothing.
+        overwritten. -Clipboard restores the clipboard text in place (a reply copied from the chat) instead; it
+        needs the same tools as Protect-Output -Clipboard. -WhatIf writes nothing.
 
     .PARAMETER Text
         Text to restore; accepts pipeline input. Strings are joined with newlines.
+
+    .PARAMETER Clipboard
+        Restore the clipboard text and put the result back on the clipboard.
 
     .PARAMETER Path
         File to restore; wildcards allowed but they must match exactly one file.
@@ -35,6 +39,9 @@ function Restore-RedactedText {
         Get-Clipboard -Raw | Restore-RedactedText -MapPath .\session1.redactmap.json
 
     .EXAMPLE
+        Restore-RedactedText -Clipboard -MapPath session1.redactmap.json
+
+    .EXAMPLE
         Restore-RedactedText -Path .\reply.txt -MapPath session1.redactmap.json -OutputPath .\reply.restored.txt
 
     .OUTPUTS
@@ -44,11 +51,12 @@ function Restore-RedactedText {
     [OutputType([string])]
     param(
         [Parameter(Mandatory, ValueFromPipeline, ParameterSetName = 'Text')][AllowEmptyString()][string[]]$Text,
+        [Parameter(Mandatory, ParameterSetName = 'Clipboard')][switch]$Clipboard,
         [Parameter(Mandatory, ParameterSetName = 'Path')][string]$Path,
         [Parameter(Mandatory, ParameterSetName = 'LiteralPath')][Alias('PSPath')][string]$LiteralPath,
         [Parameter(Mandatory)][string]$MapPath,
-        [string]$OutputPath,
-        [switch]$Force
+        [Parameter(ParameterSetName = 'Text')][Parameter(ParameterSetName = 'Path')][Parameter(ParameterSetName = 'LiteralPath')][string]$OutputPath,
+        [Parameter(ParameterSetName = 'Text')][Parameter(ParameterSetName = 'Path')][Parameter(ParameterSetName = 'LiteralPath')][switch]$Force
     )
 
     begin { $lines = [System.Collections.Generic.List[string]]::new() }
@@ -60,7 +68,8 @@ function Restore-RedactedText {
         foreach ($e in (Read-RedactMap -Path (Resolve-RedactMapPath -MapPath $MapPath)).Entries) { [void]$tokens.TryAdd($e.Token, $e.Original) }
 
         $file = $null
-        if ($PSCmdlet.ParameterSetName -eq 'Text') { $body = $lines -join "`n" }
+        if ($Clipboard) { $body = Get-RedactClipboard }
+        elseif ($PSCmdlet.ParameterSetName -eq 'Text') { $body = $lines -join "`n" }
         else {
             $found = @(if ($Path) { Resolve-Path -Path $Path } else { Resolve-Path -LiteralPath $LiteralPath })
             if ($found.Count -ne 1) { throw (Get-RedactErrorRecord -ErrorId 'RedactOutput.OneFileOnly' -Message 'Restore takes exactly one input file.') }
@@ -83,6 +92,10 @@ function Restore-RedactedText {
             }
         }
 
+        if ($Clipboard) {
+            if ($PSCmdlet.ShouldProcess('clipboard', 'Replace with restored text')) { Set-RedactClipboard -Text $restored }
+            return
+        }
         if (-not $OutputPath) { return $restored }
         $out = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
         if ($file -and (Test-RedactSamePath -Left $out -Right $found[0].ProviderPath)) {

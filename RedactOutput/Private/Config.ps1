@@ -3,6 +3,29 @@
 $script:ConfigEnum = @{ ipMode = @('Classify', 'KeepPrivate', 'Keep'); pathMode = @('UserOnly', 'Full', 'Keep') }
 # Object-array keys and the fields every entry needs.
 $script:ConfigShape = @{ netbiosDomains = @('netbios', 'fqdn'); extraTerms = @('term', 'label'); hostPatterns = @('regex') }
+# New-RedactionConfig: parameter name -> config key (TenantPrefix joins the resource prefixes).
+$script:ConfigParameter = [ordered]@{
+    InternalDomains = 'internalDomains'; NetbiosDomain = 'netbiosDomains'; HostPattern = 'hostPatterns'; HostList = 'hostList'
+    ResourcePrefix = 'resourcePrefixes'; TenantPrefix = 'resourcePrefixes'; Username = 'usernames'; ExtraTerm = 'extraTerms'
+    GuidAllowlist = 'guidAllowlist'; PublicHostAllowlist = 'publicHostAllowlist'; PublicDomain = 'publicDomains'
+    IpAllowlist = 'ipAllowlist'; IpMode = 'ipMode'; PathMode = 'pathMode'; SidKeepRid = 'sidKeepRid'; Categories = 'categories'
+    SecretName = 'secretNames'; NonSecretName = 'nonSecretNames'; DeviceSerialPattern = 'deviceSerialPatterns'
+}
+# Interactive questions: parameter (or NetbiosName/NetbiosFqdn, joined afterwards), prompt, and whether a comma splits the answer.
+$script:ConfigQuestion = @(
+    @('InternalDomains', 'Internal domains, comma separated (e.g. ad.contoso.example)', $true),
+    @('NetbiosName', 'NetBIOS domain name (e.g. CONTOSO)', $false),
+    @('NetbiosFqdn', 'FQDN of that NetBIOS domain', $false),
+    @('HostPattern', 'Desktop host name regex (e.g. WS-[0-9]{3,})', $false),
+    @('HostPattern', 'Laptop host name regex (e.g. LT-[0-9]{3,})', $false),
+    @('HostPattern', 'Server host name regex (e.g. SRV-[A-Z]{2,4}[0-9]{2,})', $false),
+    @('HostPattern', 'VM host name regex (e.g. VM-[0-9]{3,})', $false),
+    @('HostPattern', 'Linux host name regex (e.g. dkr-[0-9]{2,})', $false),
+    @('ResourcePrefix', 'Azure resource and resource group prefixes, comma separated (e.g. rg-contoso-)', $true),
+    @('Username', 'User and service account names, comma separated', $true),
+    @('TenantPrefix', 'Tenant prefix (the part before .onmicrosoft.us)', $false),
+    @('ExtraTerm', 'Extra terms as TERM=label, comma separated (e.g. Project Placeholder=proj)', $true)
+)
 
 function Get-RedactConfigDir {
     [CmdletBinding()]
@@ -51,22 +74,53 @@ function ConvertTo-RedactLabel {
     (Get-RedactRegex -Pattern '[^a-z0-9]').Replace($Label.ToLowerInvariant(), '')
 }
 
+# Pattern -> compile/probe outcome ('' when fine), so each config pattern is probed once per session.
+$script:PatternProbe = @{}
+
+function Test-RedactPatternCompile {
+    # Compiles each pattern and runs it once over a long probe string (catastrophic backtracking hits the 2-second timeout).
+    # This runs in a throw-away runspace because a .NET parse error embeds the pattern text, and PowerShell keeps that
+    # text in $Error and in any -ErrorVariable even when the error is caught. The option set mirrors New-RedactRegex.
+    # Returns one reason per pattern ('' when fine), in order; reasons never contain pattern text.
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param([AllowEmptyCollection()][string[]]$Pattern = @())
+
+    $todo = @($Pattern | Select-Object -Unique).Where({ -not $script:PatternProbe.ContainsKey($_) })
+    if ($todo.Count -gt 0) {
+        $probe = {
+            param([string[]]$Pattern)
+            $text = ('a' * 2500) + ('1' * 2499) + '!'
+            $options = [System.Text.RegularExpressions.RegexOptions]'Compiled, CultureInvariant, IgnoreCase'
+            foreach ($p in $Pattern) {
+                try { [void][regex]::new($p, $options, [timespan]::FromSeconds(2)).IsMatch($text); '' }
+                catch [System.Text.RegularExpressions.RegexMatchTimeoutException] { 'exceeded the regex time limit' }
+                catch { 'does not compile' }
+            }
+        }
+        $shell = [powershell]::Create()
+        try { $outcome = @($shell.AddScript($probe).AddArgument($todo).Invoke()) }
+        finally { $shell.Dispose() }
+        for ($i = 0; $i -lt $todo.Count; $i++) { $script:PatternProbe[$todo[$i]] = [string]$outcome[$i] }
+    }
+    $Pattern.ForEach({ $script:PatternProbe[$_] })
+}
+
 function Get-RedactPatternProblem {
     # Why a config regex is rejected, or nothing. The reason never contains the pattern text.
     [CmdletBinding()]
     [OutputType([string])]
-    param([Parameter(Mandatory)][pscustomobject]$Pattern)
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Pattern,
+        [string]$CompileProblem
+    )
 
     $text = $Pattern.Regex
     if ($text.Length -lt 3) { return 'too short' }
-    try {
-        $regex = Get-RedactRegex -Pattern $text -IgnoreCase
-        if ((Get-RedactRegex -Pattern '\((?:[^()\\]|\\.)*(?:[+*]|\{[0-9]+,[0-9]*\})(?:[^()\\]|\\.)*\)(?:[+*]|\{[0-9]+,)').IsMatch($text)) { return 'nested quantifier' }
-        if ($Pattern.MinLength -lt 4 -and -not (Get-RedactRegex -Pattern '0-9|\\d').IsMatch($text)) { return 'needs minLength >= 4 or a digit class' }
-        [void]$regex.IsMatch(('a' * 2500) + ('1' * 2499) + '!')
-    }
-    catch [System.Text.RegularExpressions.RegexMatchTimeoutException] { return 'exceeded the regex time limit' }
-    catch [System.ArgumentException] { return 'does not compile' }
+    if ($CompileProblem -eq 'does not compile') { return $CompileProblem }
+    if ((Get-RedactRegex -Pattern '\((?:[^()\\]|\\.)*(?:[+*]|\{[0-9]+,[0-9]*\})(?:[^()\\]|\\.)*\)(?:[+*]|\{[0-9]+,)').IsMatch($text)) { return 'nested quantifier' }
+    if ($Pattern.MinLength -lt 4 -and -not (Get-RedactRegex -Pattern '0-9|\\d').IsMatch($text)) { return 'needs minLength >= 4 or a digit class' }
+    $CompileProblem
 }
 
 function Get-RedactConfigProblem {
@@ -92,11 +146,11 @@ function Get-RedactConfigProblem {
         }
     }
     foreach ($key in 'hostPatterns', 'deviceSerialPatterns') {
-        $i = 0
-        foreach ($entry in (Get-RedactConfigList -Config $Config -Key $key)) {
-            $problem = Get-RedactPatternProblem -Pattern (Get-RedactPatternEntry -Entry $entry)
+        $entries = @(Get-RedactConfigList -Config $Config -Key $key | ForEach-Object { Get-RedactPatternEntry -Entry $_ })
+        $compiled = @(Test-RedactPatternCompile -Pattern @($entries.ForEach({ $_.Regex })))
+        for ($i = 0; $i -lt $entries.Count; $i++) {
+            $problem = Get-RedactPatternProblem -Pattern $entries[$i] -CompileProblem $compiled[$i]
             if ($problem) { return "${key}[$i] rejected: $problem." }
-            $i++
         }
     }
 }
@@ -187,3 +241,69 @@ function Get-RedactConfig {
     }
     $config
 }
+
+#region Scaffolding (New-RedactionConfig)
+
+function ConvertTo-RedactConfigEntry {
+    # Shorthand to an object entry: 'NETBIOS=fqdn' and 'TERM=label' (split at the last '='), a bare host regex (minLength 6).
+    # A string that does not fit becomes an incomplete entry, which the config validator then rejects by key and index.
+    [CmdletBinding()]
+    [OutputType([System.Collections.IDictionary])]
+    param(
+        [Parameter(Mandatory)][object]$Value,
+        [Parameter(Mandatory)][string]$Key
+    )
+
+    if ($Value -is [System.Collections.IDictionary]) { return $Value }
+    $fields = $script:ConfigShape[$Key]
+    if ($Key -eq 'hostPatterns') { return @{ regex = [string]$Value; minLength = 6 } }
+    $at = ([string]$Value).LastIndexOf('=')
+    if ($at -lt 1) { return @{ $fields[0] = [string]$Value } }
+    @{ $fields[0] = $Value.Substring(0, $at).Trim(); $fields[1] = $Value.Substring($at + 1).Trim() }
+}
+
+function Test-RedactInteractive {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+
+    [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+}
+
+function Read-RedactConfigAnswer {
+    # Asks the questions in $script:ConfigQuestion; returns parameter name -> answers (blank answers are dropped).
+    # Answers are never echoed back.
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param()
+
+    $answers = @{}
+    foreach ($question in $script:ConfigQuestion) {
+        $name, $prompt, $split = $question
+        $reply = (Read-Host -Prompt $prompt).Trim()
+        $list = @(if ($split) { $reply -split ',' | ForEach-Object { $_.Trim() } } else { $reply }).Where({ $_ })
+        if ($list.Count -gt 0) { $answers[$name] = @(if ($answers.ContainsKey($name)) { $answers[$name] }) + $list }
+    }
+    if ($answers.ContainsKey('NetbiosName') -and $answers.ContainsKey('NetbiosFqdn')) {
+        $answers['NetbiosDomain'] = @("$($answers['NetbiosName'][0])=$($answers['NetbiosFqdn'][0])")
+    }
+    $answers.Remove('NetbiosName')
+    $answers.Remove('NetbiosFqdn')
+    $answers
+}
+
+function Test-RedactGitIgnored {
+    # $true or $false from git check-ignore; $null when git is missing or the file is not inside a repository.
+    [CmdletBinding()]
+    [OutputType([object])]
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Get-Command -Name git -ErrorAction Ignore)) { return $null }
+    $folder = [System.IO.Path]::GetDirectoryName($Path)
+    $null = & git -C $folder rev-parse --is-inside-work-tree 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $null = & git -C $folder check-ignore -q -- $Path 2>$null
+    $LASTEXITCODE -eq 0
+}
+
+#endregion
