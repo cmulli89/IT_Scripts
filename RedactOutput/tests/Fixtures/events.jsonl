@@ -1,0 +1,3 @@
+{"time":"2026-01-15T10:00:00Z","user":"jane.example@contoso.example","clientSecret":"FakeSecretValue123","count":3}
+plain text line from host WS-1234 with no JSON
+{"time":"2026-01-15T10:00:01Z","ip":"192.0.2.10","tags":["a","b"]}

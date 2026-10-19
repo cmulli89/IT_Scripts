@@ -77,7 +77,39 @@ function Write-RedactAudit {
 
 function Write-RedactFinding {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][object]$Finding)
+    param(
+        [Parameter(Mandatory)][object]$Finding,
+        [string]$Source
+    )
 
-    Write-Warning "Residual $($Finding.Category) at line $($Finding.Line), column $($Finding.Column), length $($Finding.Length)"
+    Write-Warning "Residual $($Finding.Category) at line $($Finding.Line), column $($Finding.Column), length $($Finding.Length)$(if ($Source) { " in $Source" })"
+}
+
+function Confirm-RedactFinding {
+    # Residual findings (already in Session.Findings): -Strict throws, naming categories and the count only, before
+    # anything is written; otherwise each finding becomes one warning.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Session,
+        [switch]$Strict,
+        [string]$Source
+    )
+
+    if ($Strict -and $Session.Findings.Count -gt 0) {
+        $categories = ($Session.Findings.Category | Sort-Object -Unique) -join ', '
+        throw (Get-RedactErrorRecord -ErrorId 'RedactOutput.StrictResidual' -Message "-Strict: $($Session.Findings.Count) residual finding(s) in: $categories. Nothing was written.")
+    }
+    foreach ($finding in $Session.Findings) { Write-RedactFinding -Finding $finding -Source $Source }
+}
+
+function Write-RedactSummary {
+    # What -WhatIf reports: per-category counts and the residual count, never values.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'WhatIf reports per-category counts to the host; counts only, never values.')]
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$Session)
+
+    foreach ($label in $Session.Counts.Keys) {
+        if ($Session.Counts[$label] -gt 0) { Write-Host "${label}: $($Session.Counts[$label])" }
+    }
+    Write-Host "residual findings: $($Session.Findings.Count)"
 }

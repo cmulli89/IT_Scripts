@@ -116,7 +116,7 @@ function Read-RedactConfigFile {
         $data
     }
     catch {
-        $PSCmdlet.ThrowTerminatingError((Get-RedactErrorRecord -Message "Config layer '$Layer' could not be read as a JSON object." -ErrorId 'RedactOutput.ConfigInvalid'))
+        throw (Get-RedactErrorRecord -Message "Config layer '$Layer' could not be read as a JSON object." -ErrorId 'RedactOutput.ConfigInvalid')
     }
 }
 
@@ -174,7 +174,7 @@ function Get-RedactConfig {
     foreach ($layer in $layers.Keys) {
         if (-not (Test-Path -LiteralPath $layers[$layer] -PathType Leaf)) {
             if ($layer -eq 'ConfigPath') {
-                $PSCmdlet.ThrowTerminatingError((Get-RedactErrorRecord -Message 'The file given by -ConfigPath was not found.' -ErrorId 'RedactOutput.ConfigNotFound' -Category ObjectNotFound))
+                throw (Get-RedactErrorRecord -Message 'The file given by -ConfigPath was not found.' -ErrorId 'RedactOutput.ConfigNotFound' -Category ObjectNotFound)
             }
             continue
         }
@@ -183,7 +183,7 @@ function Get-RedactConfig {
     if ($Override) { Merge-RedactConfig -Base $config -Layer $Override }
     $problem = Get-RedactConfigProblem -Config $config
     if ($problem) {
-        $PSCmdlet.ThrowTerminatingError((Get-RedactErrorRecord -Message "Config rejected: $problem" -ErrorId 'RedactOutput.ConfigInvalid'))
+        throw (Get-RedactErrorRecord -Message "Config rejected: $problem" -ErrorId 'RedactOutput.ConfigInvalid')
     }
     $config
 }

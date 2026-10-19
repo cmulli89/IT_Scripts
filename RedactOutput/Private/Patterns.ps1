@@ -13,7 +13,8 @@ $script:NonSecretNameSeed = @(
     'ms-Mcs-AdmPwdExpirationTime', 'msLAPS-PasswordExpirationTime'
 )
 
-$script:RegexCache = @{}
+$script:RegexCache = [System.Collections.Generic.Dictionary[string, regex]]::new()
+$script:RegexCacheIgnoreCase = [System.Collections.Generic.Dictionary[string, regex]]::new()
 
 function New-RedactRegex {
     <#
@@ -44,19 +45,21 @@ function New-RedactRegex {
 }
 
 function Get-RedactRegex {
-    # Compile each distinct pattern once per module load.
+    # Compile each distinct pattern once per module load. Called per match, so no Mandatory (its binding cost shows).
     [CmdletBinding()]
     [OutputType([regex])]
     param(
-        [Parameter(Mandatory)][string]$Pattern,
+        [string]$Pattern,
         [switch]$IgnoreCase
     )
 
-    $key = "$($IgnoreCase.IsPresent)|$Pattern"
-    if (-not $script:RegexCache.ContainsKey($key)) {
-        $script:RegexCache[$key] = New-RedactRegex -Pattern $Pattern -IgnoreCase:$IgnoreCase
+    $cache = if ($IgnoreCase) { $script:RegexCacheIgnoreCase } else { $script:RegexCache }
+    $regex = $null
+    if (-not $cache.TryGetValue($Pattern, [ref]$regex)) {
+        $regex = New-RedactRegex -Pattern $Pattern -IgnoreCase:$IgnoreCase
+        $cache[$Pattern] = $regex
     }
-    $script:RegexCache[$key]
+    $regex
 }
 
 function Get-RedactTokenPattern {
@@ -69,17 +72,52 @@ function Get-RedactTokenPattern {
 }
 
 function Test-RedactSkipValue {
-    # True for values S04/S05 must leave alone: empty, null-ish, booleans, masks and PowerShell variable references.
+    # True for values S04/S05 must leave alone: empty, null-ish, booleans, masks, bare brackets (pretty-printed JSON),
+    # PowerShell variable references and values that are already a single token.
     [CmdletBinding()]
     [OutputType([bool])]
     param([string]$Value)
 
     $v = $Value.Trim().TrimEnd(',').Trim()
-    ($v.Length -eq 0) -or ($v -in '$null', 'null', 'true', 'false', 'none') -or ($v[0] -eq '$') -or ($v.Trim('*').Length -eq 0)
+    if (($v.Length -eq 0) -or ($v -in '$null', 'null', 'true', 'false', 'none') -or ($v[0] -eq '$') -or ($v.Trim('*', '[', ']', '{', '}').Length -eq 0)) { return $true }
+    $token = (Get-RedactTokenPattern).Match($v)
+    $token.Success -and $token.Length -eq $v.Length
+}
+
+function Get-RedactSecretNameTerm {
+    # Alternation of the S04 name fragments plus the escaped config secretNames; shared by the rule table and the name test.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([hashtable]$Config = @{})
+
+    $terms = [System.Collections.Generic.List[string]]::new()
+    $terms.Add($script:SecretNameBase)
+    foreach ($name in @($Config['secretNames'])) {
+        if ($name) {
+            $escaped = [regex]::Escape($name)
+            $terms.Add($escaped)
+        }
+    }
+    $terms -join '|'
+}
+
+function Test-RedactSecretName {
+    # The S04 name test for structured data (JSON property, CSV column, XML name): secret-looking and not on the deny-list.
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Name,
+        [Parameter(Mandatory)][object]$Session
+    )
+
+    (Get-RedactRegex -Pattern (Get-RedactSecretNameTerm -Config $Session.Config) -IgnoreCase).IsMatch($Name) -and -not $Session.NonSecretNames.Contains($Name)
 }
 
 function ConvertTo-RedactRule {
-    # Table row -> rule. Patterns are compiled through Get-RedactRegex; Enabled is false for a row with no patterns,
+    # Table row -> rule. Needs is an optional cheap pre-check (an alternation of text every match must contain; it is
+    # always case-insensitive, so it can only over-approximate). Probe is what the engine tests before running the
+    # rule at all: Needs, else the rule's only regex. A text the probe does not match skips the rule.
+    # Patterns are compiled through Get-RedactRegex; Enabled is false for a row with no patterns,
     # a row switched off by its Off flag, or an identifier whose categories.<label> is false (secrets cannot be disabled).
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -96,6 +134,7 @@ function ConvertTo-RedactRule {
         Label      = $Row['Label']
         Kind       = if ($Row['Kind']) { $Row['Kind'] } else { $Kind }
         Regex      = [regex[]]$regex
+        Probe      = if ($Row['Needs']) { Get-RedactRegex -Pattern $Row['Needs'] -IgnoreCase } elseif ($regex.Count -eq 1) { $regex[0] }
         Test       = $Row['Test']
         Evaluator  = $Row['Evaluator']
         MinLength  = [int]$Row['MinLength']
@@ -122,15 +161,7 @@ function Get-RedactSecretRule {
     [OutputType([hashtable[]])]
     param([hashtable]$Config = @{})
 
-    $terms = [System.Collections.Generic.List[string]]::new()
-    $terms.Add($script:SecretNameBase)
-    foreach ($name in @($Config['secretNames'])) {
-        if ($name) {
-            $escaped = [regex]::Escape($name)
-            $terms.Add($escaped)
-        }
-    }
-    $nameRx = '[A-Za-z0-9_.-]*(?:' + ($terms -join '|') + ')[A-Za-z0-9_.-]*'
+    $nameRx = '[A-Za-z0-9_.-]*(?:' + (Get-RedactSecretNameTerm -Config $Config) + ')[A-Za-z0-9_.-]*'
     # S04 value: quoted (quotes kept) or unquoted to end of line.
     $lineVal = '(?:"(?<val>[^"\r\n]+)"|''(?<val>[^''\r\n]+)''|(?<val>[^\s"''][^\r\n]*?)(?=[ \t]*\r?$))'
     $jsonStr = '(?:[^"\\]|\\.)*'
@@ -152,44 +183,44 @@ function Get-RedactSecretRule {
 
     # Order matters: specific types first so they win the label; S04 last.
     $table = @(
-        @{ Id = 'S01'; Label = 'pem-key'; Patterns = @(
+        @{ Id = 'S01'; Label = 'pem-key'; Needs = 'PRIVATE KEY'; Patterns = @(
             '(?s)-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----(?:.*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----|.*\z)') }
-        @{ Id = 'S16'; Label = 'dpapi'; IgnoreCase = $true; Patterns = @(
+        @{ Id = 'S16'; Label = 'dpapi'; IgnoreCase = $true; Needs = '01000000d08c9ddf'; Patterns = @(
             '(?<![A-Za-z0-9_])01000000d08c9ddf0115d1118c7a00c04fc297eb[0-9a-f]{40,}') }
-        @{ Id = 'S02'; Label = 'jwt'; Patterns = @(
+        @{ Id = 'S02'; Label = 'jwt'; Needs = 'eyJ'; Patterns = @(
             '(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*') }
-        @{ Id = 'S07'; Label = 'url-cred'; IgnoreCase = $true; Test = $valueTest; Patterns = @(
+        @{ Id = 'S07'; Label = 'url-cred'; IgnoreCase = $true; Needs = '://'; Test = $valueTest; Patterns = @(
             '(?<![A-Za-z0-9_])[a-z][a-z0-9+.-]{1,15}://(?<val>[^/\s@''"]*:[^/\s@''"]+)@'
             '(?<![A-Za-z0-9_])[a-z][a-z0-9+.-]{1,15}://(?<val>[^/\s:@''"]{20,})@') }
-        @{ Id = 'S03'; Label = 'auth-header'; IgnoreCase = $true; Patterns = @(
+        @{ Id = 'S03'; Label = 'auth-header'; IgnoreCase = $true; Needs = 'Authorization|Bearer'; Patterns = @(
             '(?<![A-Za-z0-9_])(?:Proxy-)?Authorization["'']?[ \t]*[:=][ \t]*["'']?(?:Bearer|Basic|Negotiate|NTLM|Digest|Token)[ \t]+(?<val>[^\s''"]+)'
             '(?<![A-Za-z0-9_])(?-i:Bearer)[ \t]+(?<val>[A-Za-z0-9._~+/=-]{20,})') }
-        @{ Id = 'S05'; Label = 'connstr'; IgnoreCase = $true; Test = $valueTest; Patterns = @(
+        @{ Id = 'S05'; Label = 'connstr'; IgnoreCase = $true; Needs = 'Key|Signature|Password|Pwd|ClientSecret'; Test = $valueTest; Patterns = @(
             '(?<![A-Za-z0-9_])(?:AccountKey|SharedAccessKey|SharedAccessSignature|Password|Pwd|ClientSecret|AccessKey)[ \t]*=[ \t]*(?<val>[^;"''\r\n]+)') }
-        @{ Id = 'S06'; Label = 'sas-sig'; IgnoreCase = $true; Patterns = @(
+        @{ Id = 'S06'; Label = 'sas-sig'; IgnoreCase = $true; Needs = 'sig='; Patterns = @(
             '[?&;]sig=(?<val>[^&\s"''#]+)') }
-        @{ Id = 'S11'; Label = 'git-token'; Patterns = @(
+        @{ Id = 'S11'; Label = 'git-token'; Needs = 'gl[a-z]+-|GR1348941|gh[pousr]_|github_pat_'; Patterns = @(
             '(?<![A-Za-z0-9_])gl(?:pat|ptt|rt|dt|oas|cbt|imt|ffct|soat|agent)-[A-Za-z0-9_-]{20,}'
             '(?<![A-Za-z0-9_])GR1348941[A-Za-z0-9_-]{20}'
             '(?<![A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{36,255}'
             '(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9_]{50,255}') }
-        @{ Id = 'S10'; Label = 'api-key'; Patterns = @(
+        @{ Id = 'S10'; Label = 'api-key'; Needs = 'sk-'; Patterns = @(
             '(?<![A-Za-z0-9_-])sk-(?:proj-|svcacct-|admin-|ant-[a-z0-9]+-)?[A-Za-z0-9_-]{20,}') }
-        @{ Id = 'S09'; Label = 'entra-secret'; Patterns = @(
+        @{ Id = 'S09'; Label = 'entra-secret'; Needs = 'Q~'; Patterns = @(
             '(?<![A-Za-z0-9_.~-])[A-Za-z0-9_.-]{3}[0-9]Q~[A-Za-z0-9_.~-]{31,34}(?![A-Za-z0-9_.~-])') }
-        @{ Id = 'S08'; Label = 'storage-key'; Patterns = @(
+        @{ Id = 'S08'; Label = 'storage-key'; Needs = '=='; Patterns = @(
             '(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{86}==(?![A-Za-z0-9+/=])') }
         @{ Id = 'S13'; Label = 'bitlocker'; Patterns = @(
             '(?<![0-9])(?:[0-9]{6}-){7}[0-9]{6}(?![0-9])') }
         @{ Id = 'S15'; Label = 'ntlm'; IgnoreCase = $true; Patterns = @(
             '(?<![0-9a-f])[0-9a-f]{32}:[0-9a-f]{32}(?![0-9a-f])'
             '(?<![A-Za-z0-9_])nt(?:lm)?(?:hash)?[ \t]*[:=][ \t]*["'']?(?<val>[0-9a-f]{32})(?![0-9a-f])') }
-        @{ Id = 'S14'; Label = 'laps'; IgnoreCase = $true; Test = $valueTest; Patterns = @(
+        @{ Id = 'S14'; Label = 'laps'; IgnoreCase = $true; Needs = 'AdmPwd|msLAPS-|"p"'; Test = $valueTest; Patterns = @(
             '(?<![A-Za-z0-9_-])(?:ms-Mcs-AdmPwd|msLAPS-(?:Encrypted)?Password(?:History)?)[ \t]*[:=][ \t]*(?<val>[^\r\n]+)'
             '(?:"[nt]"[ \t]*:[ \t]*"[^"\\]*"[ \t]*,[ \t]*)+"p"[ \t]*:[ \t]*"(?<val>' + $jsonStr + ')"') }
-        @{ Id = 'S12'; Label = 'duo-skey'; IgnoreCase = $true; Patterns = @(
+        @{ Id = 'S12'; Label = 'duo-skey'; IgnoreCase = $true; Needs = 'skey|secret'; Patterns = @(
             '(?<![A-Za-z0-9_])(?:duo[_.-]?)?(?:skey|secret[_ -]?key)[ \t]*[:=][ \t]*["'']?(?<val>[A-Za-z0-9]{40})(?![A-Za-z0-9])') }
-        @{ Id = 'S04'; Label = 'kv'; IgnoreCase = $true; Test = $valueTest; Patterns = $kvPatterns }
+        @{ Id = 'S04'; Label = 'kv'; IgnoreCase = $true; Needs = (Get-RedactSecretNameTerm -Config $Config); Test = $valueTest; Patterns = $kvPatterns }
     )
 
     foreach ($row in $table) { ConvertTo-RedactRule -Row $row -Kind secret -Config $Config }
@@ -197,8 +228,9 @@ function Get-RedactSecretRule {
 
 #region Identifier helpers
 
-# JSON person fields (text mode) and the token type each one gets.
-$script:PersonField = @{ givenname = 'name'; surname = 'name'; mobilephone = 'phone'; employeeid = 'emp' }
+# JSON person fields and the token type each one gets. The text-mode rule lists its own fields; the JSON walker
+# uses this map (displayName only inside an object that also has userPrincipalName or mail).
+$script:PersonField = @{ givenname = 'name'; surname = 'name'; mobilephone = 'phone'; employeeid = 'emp'; businessphones = 'phone'; displayname = 'name' }
 
 function Get-RedactAlternation {
     # One alternation of escaped literals, longest first; nothing when there are no terms.
@@ -501,7 +533,8 @@ function Get-RedactIdentifierRule {
 
     $hostToken = { param($m, $s) Get-RedactToken -Session $s -Type host -Original $m.Groups['val'].Value }
     $userToken = { param($m, $s) Get-RedactToken -Session $s -Type user -Original $m.Groups['val'].Value }
-    $minLength = { param($m, $s, $rule) $m.Groups['val'].Value.Length -ge $rule.MinLength }
+    # Test blocks are called as ($match, $session, $rule); this one needs only the match and the rule.
+    $minLength = { $args[0].Groups['val'].Value.Length -ge $args[2].MinLength }
     $skipValue = { param($m) -not (Test-RedactSkipValue -Value $m.Groups['val'].Value) }
     $personToken = {
         param($m, $s)
@@ -523,7 +556,7 @@ function Get-RedactIdentifierRule {
     }
 
     $table = @(
-        @{ Id = 'I11'; Label = 'azure-host'; IgnoreCase = $true
+        @{ Id = 'I11'; Label = 'azure-host'; IgnoreCase = $true; Needs = 'usgovcloudapi|azure|windows\.net'
            Evaluator = { param($m, $s) Get-RedactToken -Session $s -Type res -Original $m.Groups['val'].Value }
            Patterns = @(
             '\b(?<val>[a-z0-9][a-z0-9-]{1,62})\.(?:blob|file|queue|table|dfs|vault|vaultcore|database|servicebus|azurecr|azurewebsites|scm\.azurewebsites|search|openai|cognitiveservices)(?:\.core)?\.(?:usgovcloudapi\.net|azure\.us|azurewebsites\.us|windows\.net)(?![A-Za-z0-9-])'
@@ -532,30 +565,30 @@ function Get-RedactIdentifierRule {
            Test = { param($m, $s) Test-RedactPublicHost -Name $m.Value -Session $s }
            Evaluator = { param($m) $m.Value }
            Patterns = @('(?<![A-Za-z0-9@.-])(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?![A-Za-z0-9-])') }
-        @{ Id = 'I10'; Label = 'azure-resource'; IgnoreCase = $true
+        @{ Id = 'I10'; Label = 'azure-resource'; IgnoreCase = $true; Needs = '/subscriptions/'
            Evaluator = { param($m, $s) Resolve-RedactResourceId -Path $m.Value -Session $s }
            Patterns = @('/subscriptions/' + $script:GUID + '(?:/' + $segment + ')*') }
         @{ Id = 'I10'; Label = 'azure-resource'; IgnoreCase = $true
            Evaluator = { param($m, $s) Get-RedactToken -Session $s -Type $(if ($m.Value.StartsWith('rg-', [StringComparison]::OrdinalIgnoreCase)) { 'rg' } else { 'res' }) -Original $m.Value }
            Patterns = @(if ($prefixAlt) { '(?<![A-Za-z0-9_-])(?:' + $prefixAlt + ')[A-Za-z0-9_-]*' }) }
-        @{ Id = 'I03'; Label = 'upn'; IgnoreCase = $true
+        @{ Id = 'I03'; Label = 'upn'; IgnoreCase = $true; Needs = '@'
            Test = { param($m, $s)
                $m.Groups['ext'].Success -or ($m.Groups['local'].Value -notin $script:KeepLocalPart) -or
                    -not (Test-RedactNameSet -Set $s.Allow.Domain -Name $m.Groups['dom'].Value) }
            Evaluator = { param($m, $s) Resolve-RedactMail -Match $m -Session $s }
            Patterns = @('(?<![A-Za-z0-9._%+-])(?<local>[A-Za-z0-9._%+-]+)(?<ext>#EXT#)?@(?<dom>(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})(?![A-Za-z0-9-])') }
-        @{ Id = 'I04'; Label = 'tenant'; IgnoreCase = $true
+        @{ Id = 'I04'; Label = 'tenant'; IgnoreCase = $true; Needs = 'onmicrosoft|sharepoint'
            Evaluator = { param($m, $s) Get-RedactToken -Session $s -Type tenant -Original $m.Groups['val'].Value }
            Patterns = @(
             '(?<![A-Za-z0-9-])(?<val>[A-Za-z0-9][A-Za-z0-9-]*)\.onmicrosoft\.(?:us|com)(?![A-Za-z0-9-])'
             '(?<![A-Za-z0-9-])(?<val>[A-Za-z0-9][A-Za-z0-9-]*?)(?:-my|-admin)?\.sharepoint\.(?:us|com)(?![A-Za-z0-9-])') }
-        @{ Id = 'I13'; Label = 'unc'; IgnoreCase = $true
+        @{ Id = 'I13'; Label = 'unc'; IgnoreCase = $true; Needs = '\\\\'
            Test = { param($m, $s) -not ((Test-RedactKeepHost -Name $m.Groups['h'].Value -Session $s) -and (Test-RedactKeepShare -Name $m.Groups['sh'].Value)) }
            Evaluator = { param($m, $s) Resolve-RedactUnc -Match $m -Session $s }
            Patterns = @(
             $uncStart + '\\\\' + $uncHost + '\\' + $uncShare
             $uncStart + '\\\\\\\\' + $uncHost + '\\\\' + $uncShare) }
-        @{ Id = 'I15'; Label = 'domain-user'; IgnoreCase = $true
+        @{ Id = 'I15'; Label = 'domain-user'; IgnoreCase = $true; Needs = $netbiosAlt
            Evaluator = {
                param($m, $s)
                $pair = @(Get-RedactConfigList -Config $s.Config -Key 'netbiosDomains').Where({ $_['netbios'] -ieq $m.Groups['nb'].Value }, 'First')[0]
@@ -570,15 +603,15 @@ function Get-RedactIdentifierRule {
            }
            Patterns = @(if ($netbiosAlt) {
             '(?<![A-Za-z0-9_.\\-])(?<!DC=)(?<nb>' + $netbiosAlt + ')(?:(?<bs>\\\\|\\)(?:(?<grp>' + $groupAlt + ')(?![A-Za-z0-9_$-])|(?<acct>[A-Za-z0-9_$-]+(?:\.[A-Za-z0-9_$-]+)*)))?(?![A-Za-z0-9_]|\.[A-Za-z0-9])' }) }
-        @{ Id = 'I14'; Label = 'profile-path'; IgnoreCase = $true; Off = ($Config['pathMode'] -eq 'Keep')
+        @{ Id = 'I14'; Label = 'profile-path'; IgnoreCase = $true; Off = ($Config['pathMode'] -eq 'Keep'); Needs = $(if ($Config['pathMode'] -ne 'Full') { 'Users|home' })
            Test = { param($m, $s) @(Get-RedactPathPart -Path $m.Value -Full:($s.Config['pathMode'] -eq 'Full')).Where({ $_.Kind -in 'user', 'path' }).Count -gt 0 }
            Evaluator = { param($m, $s) Resolve-RedactPath -Path $m.Value -Session $s }
            Patterns = @($profilePath) }
-        @{ Id = 'I05'; Label = 'fqdn'; IgnoreCase = $true
+        @{ Id = 'I05'; Label = 'fqdn'; IgnoreCase = $true; Needs = 'DC='
            Evaluator = { param($m, $s) Resolve-RedactDn -Match $m -Session $s }
            Patterns = @(if ($dnAlt) {
             '(?<![A-Za-z0-9_=,-])(?<rdn>(?>(?:(?:CN|OU)=(?:[^,=\\\r\n]|\\.)*,[ ]?)*))(?<dom>(?:DC=[A-Za-z0-9_-]+,)*(?:' + $dnAlt + '))(?![A-Za-z0-9_-])' }) }
-        @{ Id = 'I05'; Label = 'fqdn'; IgnoreCase = $true
+        @{ Id = 'I05'; Label = 'fqdn'; IgnoreCase = $true; Needs = $domainAlt
            Evaluator = {
                param($m, $s)
                $domainToken = Get-RedactToken -Session $s -Type domain -Original $m.Groups['dom'].Value
@@ -586,7 +619,7 @@ function Get-RedactIdentifierRule {
            }
            Patterns = @(if ($domainAlt) {
             '(?<![A-Za-z0-9_.-])(?:(?<dom>' + $domainAlt + ')|(?<h>[A-Za-z0-9_-]+)\.(?<dom>(?:[A-Za-z0-9_-]+\.)*?(?:' + $domainAlt + ')))(?![A-Za-z0-9_-])' }) }
-        @{ Id = 'I02'; Label = 'sid'; IgnoreCase = $true
+        @{ Id = 'I02'; Label = 'sid'; IgnoreCase = $true; Needs = 'S-1-'
            Evaluator = {
                param($m, $s)
                if ($m.Groups['cloud'].Success) { return Get-RedactToken -Session $s -Type sid-cloud -Original $m.Groups['cloud'].Value }
@@ -602,7 +635,7 @@ function Get-RedactIdentifierRule {
            Patterns = @(
             '(?<![0-9A-Fa-f])(?<val>' + $script:GUID + ')(?![0-9A-Fa-f])'
             '(?<![A-Za-z0-9_.-])[A-Za-z0-9_.-]*(?:id|guid)["'']?[ \t]*[:=][ \t]*["'']?(?<val>[0-9a-f]{32})(?![0-9A-Za-z])') }
-        @{ Id = 'I17'; Label = 'extra-term'; IgnoreCase = $true
+        @{ Id = 'I17'; Label = 'extra-term'; IgnoreCase = $true; Needs = $termAlt
            Evaluator = {
                param($m, $s)
                $term = $m.Groups['val'].Value
@@ -610,12 +643,12 @@ function Get-RedactIdentifierRule {
                Get-RedactToken -Session $s -Type ('term-' + (ConvertTo-RedactLabel -Label ([string]$entry['label']))) -Original $term
            }
            Patterns = @(if ($termAlt) { ConvertTo-RedactWordPattern -Pattern $termAlt }) }
-        @{ Id = 'I06'; Label = 'host'; IgnoreCase = $true; Evaluator = $hostToken
+        @{ Id = 'I06'; Label = 'host'; IgnoreCase = $true; Needs = $hostAlt; Evaluator = $hostToken
            Patterns = @(if ($hostAlt) { ConvertTo-RedactWordPattern -Pattern $hostAlt }) }
         $hostRows
-        @{ Id = 'I16'; Label = 'person'; IgnoreCase = $true; Evaluator = $userToken
+        @{ Id = 'I16'; Label = 'person'; IgnoreCase = $true; Needs = $userAlt; Evaluator = $userToken
            Patterns = @(if ($userAlt) { ConvertTo-RedactWordPattern -Pattern $userAlt }) }
-        @{ Id = 'I16'; Label = 'person'; IgnoreCase = $true; Evaluator = $personToken
+        @{ Id = 'I16'; Label = 'person'; IgnoreCase = $true; Needs = 'givenName|surname|mobilePhone|employeeId|businessPhones'; Evaluator = $personToken
            Patterns = @(
             '"(?<field>givenName|surname|mobilePhone|employeeId)"[ \t]*:[ \t]*"(?<val>(?:[^"\\]|\\.)*)"'
             '(?<="businessPhones"\s*:\s*\[(?:\s*"(?:[^"\\]|\\.)*"\s*,)*\s*)"(?<val>(?:[^"\\]|\\.)*)"') }
@@ -639,11 +672,11 @@ function Get-RedactIdentifierRule {
                    -not ($address.Equals([System.Net.IPAddress]::IPv6Loopback) -or $address.Equals([System.Net.IPAddress]::IPv6Any))
            }
            Evaluator = { param($m, $s) Get-RedactToken -Session $s -Type ip6 -Original $m.Groups['ip'].Value }
-           Patterns = @('(?<![A-Za-z0-9:.])(?<ip>[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*[0-9A-Fa-f:])(?:%[A-Za-z0-9]+)?(?![A-Za-z0-9:])') }
-        @{ Id = 'I12'; Label = 'thumbprint'; IgnoreCase = $true
+           Patterns = @('(?<![A-Za-z0-9:.])(?=(?:[0-9A-Fa-f.]*:){7}|[0-9A-Fa-f:.]*::)(?<ip>[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*[0-9A-Fa-f:])(?:%[A-Za-z0-9]+)?(?![A-Za-z0-9:])') }
+        @{ Id = 'I12'; Label = 'thumbprint'; IgnoreCase = $true; Needs = $thumbKeyword
            Evaluator = { param($m, $s) Get-RedactToken -Session $s -Type thumb -Original $m.Groups['val'].Value }
            Patterns = @($hex40 + '(?:(?<=(?:' + $thumbKeyword + ')[^\r\n]*)|(?=[^\r\n]*(?:' + $thumbKeyword + ')))') }
-        @{ Id = 'I12'; Label = 'thumbprint'; IgnoreCase = $true; Test = $skipValue; Evaluator = $serialToken
+        @{ Id = 'I12'; Label = 'thumbprint'; IgnoreCase = $true; Needs = 'Serial|ServiceTag|IdentifyingNumber'; Test = $skipValue; Evaluator = $serialToken
            Patterns = @('(?<![A-Za-z0-9_])(?:SerialNumber|Serial|ServiceTag|IdentifyingNumber)(?![A-Za-z0-9_])["'']?[ \t]*[:=][ \t]*["'']?(?<val>[A-Za-z0-9-]{4,})') }
         $serialRows
     )

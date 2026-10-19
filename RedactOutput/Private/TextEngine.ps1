@@ -7,6 +7,8 @@ $script:ResidualCheck = @('Get-RedactRuleResidual', 'Get-RedactEntropyResidual',
 
 function Get-RedactErrorRecord {
     # Messages passed here must name categories, rule ids or parameters only, never matched text.
+    # Raise the record with throw, not ThrowTerminatingError: from a helper that only ends the calling statement, so a loop or
+    # a later statement would carry on (and could still write output).
     [CmdletBinding()]
     [OutputType([System.Management.Automation.ErrorRecord])]
     param(
@@ -47,13 +49,14 @@ function Edit-RedactText {
         [Parameter(Mandatory)][object[]]$Edit
     )
 
+    # Substring, not Append(string, int, int): PowerShell binds that call to the char[] overload and copies the whole text each time.
     $sb = [System.Text.StringBuilder]::new($Text.Length)
     $pos = 0
     foreach ($e in $Edit) {
-        [void]$sb.Append($Text, $pos, $e.Start - $pos).Append($e.Replacement)
+        [void]$sb.Append($Text.Substring($pos, $e.Start - $pos)).Append($e.Replacement)
         $pos = $e.Start + $e.Length
     }
-    [void]$sb.Append($Text, $pos, $Text.Length - $pos)
+    [void]$sb.Append($Text.Substring($pos))
     $sb.ToString()
 }
 
@@ -163,6 +166,30 @@ function New-RedactSession {
     }
 }
 
+function Protect-RedactSecretValue {
+    # A value under a secret-named JSON property, CSV column or XML name: [secret:kv], counted as S04.
+    # Empty, null-ish and already-tokenized values are returned unchanged.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Value,
+        [Parameter(Mandatory)][object]$Session
+    )
+
+    if (Test-RedactSkipValue -Value $Value) { return $Value }
+    $Session.Counts['kv'] += 1
+    '[secret:kv]'
+}
+
+function Reset-RedactCount {
+    # Zeroes the per-category counts (not the token maps), so each file in a run reports its own counts.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Resets an in-memory counter only.')]
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$Session)
+
+    foreach ($label in @($Session.Counts.Keys)) { $Session.Counts[$label] = 0 }
+}
+
 function Select-RedactNonOverlap {
     # Longest-first, then leftmost; returns the accepted spans in position order.
     [CmdletBinding()]
@@ -204,7 +231,7 @@ function Get-RedactSpan {
         }
     }
     catch [System.Text.RegularExpressions.RegexMatchTimeoutException] {
-        $PSCmdlet.ThrowTerminatingError((Get-RedactErrorRecord -Message "Rule $($Rule.Id) exceeded the regex time limit." -ErrorId 'RedactOutput.RegexTimeout'))
+        throw (Get-RedactErrorRecord -Message "Rule $($Rule.Id) exceeded the regex time limit." -ErrorId 'RedactOutput.RegexTimeout')
     }
     if ($found.Count -le 1 -or $Rule.Regex.Count -eq 1) { return $found }
     Select-RedactNonOverlap -Span $found.ToArray()
@@ -259,7 +286,10 @@ function Invoke-RedactText {
     if ([string]::IsNullOrEmpty($Text)) { return '' }
     $store = [System.Collections.Generic.List[string]]::new()
     $work = Protect-RedactToken -Text $Text -Store $store
-    foreach ($rule in $Session.Rules) { $work = Invoke-RedactRule -Text $work -Rule $rule -Session $Session -Store $store }
+    foreach ($rule in $Session.Rules) {
+        if ($rule.Probe -and -not $rule.Probe.IsMatch($work)) { continue }
+        $work = Invoke-RedactRule -Text $work -Rule $rule -Session $Session -Store $store
+    }
     Restore-RedactSentinel -Text $work -Store $store
 }
 
@@ -293,6 +323,7 @@ function Get-RedactRuleResidual {
     $store = [System.Collections.Generic.List[string]]::new()
     $work = $Text
     foreach ($rule in $Session.Rules) {
+        if ($rule.Probe -and -not $rule.Probe.IsMatch($work)) { continue }
         if ($rule.Kind -eq 'mask') { $work = Invoke-RedactRule -Text $work -Rule $rule -Session $Session -Store $store; continue }
         foreach ($s in @(Get-RedactSpan -Text $work -Rule $rule -Session $Session)) {
             [pscustomobject]@{ Category = $rule.Label; Offset = $s.Start; Length = $s.Length }
@@ -348,7 +379,7 @@ function Get-RedactEntropyResidual {
         }
     }
     catch [System.Text.RegularExpressions.RegexMatchTimeoutException] {
-        $PSCmdlet.ThrowTerminatingError((Get-RedactErrorRecord -Message 'Rule S17 exceeded the regex time limit.' -ErrorId 'RedactOutput.RegexTimeout'))
+        throw (Get-RedactErrorRecord -Message 'Rule S17 exceeded the regex time limit.' -ErrorId 'RedactOutput.RegexTimeout')
     }
 }
 

@@ -1,0 +1,8 @@
+# service config
+database:
+  host: db.contoso.example
+  # password: FakeCommentPass1
+  password: FakeYamlPass1
+users:
+  - api_key: FakeListKey1
+  - name: example

@@ -6,7 +6,8 @@ function Test-RedactionResidual {
     .DESCRIPTION
         Runs every detection rule in detect-only mode plus the high-entropy check (S17) and returns one
         object per finding with Category, Line, Column and Length. It never returns or logs the matched
-        value, and writes nothing. Hash-shaped values (GUID, 32/40/64 hex) are not findings.
+        value, and writes nothing. Hash-shaped values (GUID, 32/40/64 hex) are not findings. Files are read
+        with encoding detection (BOM, then UTF-8, then Windows-1252); a binary file is reported as an error.
 
     .PARAMETER Text
         Text to scan; accepts pipeline input. Strings are joined with newlines.
@@ -16,6 +17,9 @@ function Test-RedactionResidual {
 
     .PARAMETER LiteralPath
         File(s) to scan, taken literally. Findings gain a Path property.
+
+    .PARAMETER Encoding
+        Forces the encoding for files (UTF8, Unicode, BigEndianUnicode, UTF32, BigEndianUTF32, Windows1252).
 
     .PARAMETER ConfigPath
         Extra JSON config file layered above the local config.
@@ -34,6 +38,7 @@ function Test-RedactionResidual {
         [Parameter(Mandatory, ValueFromPipeline, ParameterSetName = 'Text')][AllowEmptyString()][string[]]$Text,
         [Parameter(Mandatory, ParameterSetName = 'Path')][string[]]$Path,
         [Parameter(Mandatory, ParameterSetName = 'LiteralPath')][Alias('PSPath')][string[]]$LiteralPath,
+        [ValidateSet('UTF8', 'Unicode', 'BigEndianUnicode', 'UTF32', 'BigEndianUTF32', 'Windows1252')][string]$Encoding,
         [string]$ConfigPath
     )
 
@@ -49,7 +54,12 @@ function Test-RedactionResidual {
         }
         $files = if ($PSCmdlet.ParameterSetName -eq 'Path') { Resolve-Path -Path $Path } else { Resolve-Path -LiteralPath $LiteralPath }
         foreach ($file in $files) {
-            $findings = Find-RedactResidual -Text (Get-Content -LiteralPath $file.ProviderPath -Raw) -Session $session
+            $read = Read-RedactFile -LiteralPath $file.ProviderPath -Encoding $Encoding
+            if ($read.IsBinary) {
+                $PSCmdlet.WriteError((Get-RedactBinaryError -Path $file.ProviderPath))
+                continue
+            }
+            $findings = Find-RedactResidual -Text $read.Text -Session $session
             $findings | Add-Member -NotePropertyName Path -NotePropertyValue $file.ProviderPath -PassThru
         }
     }

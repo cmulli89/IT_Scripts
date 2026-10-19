@@ -1,0 +1,28 @@
+{
+  "@odata.context": "https://graph.microsoft.us/v1.0/$metadata#users",
+  "value": [
+    {
+      "id": "11111111-2222-3333-4444-555555555555",
+      "displayName": "Jane Example",
+      "givenName": "Jane",
+      "surname": "Example",
+      "userPrincipalName": "jane.example@contoso.example",
+      "mail": "jane.example@contoso.example",
+      "mobilePhone": "+1 555 0100",
+      "businessPhones": ["+1 555 0101", "+1 555 0102"],
+      "employeeId": "E000123",
+      "accountEnabled": true,
+      "passwordProfile": { "password": "FakePassw0rd!", "forceChangePasswordNextSignIn": true, "notes": ["first", "second"] },
+      "keyCredentials": [ { "displayName": "cert-1", "key": "RkFLRUtFWQ==" } ],
+      "assignedPlans": [],
+      "endpoint": "https://login.microsoftonline.us/11111111-2222-3333-4444-555555555555/oauth2/v2.0/token"
+    },
+    {
+      "id": "00000003-0000-0000-c000-000000000000",
+      "displayName": "Helpdesk Team",
+      "description": "Shared mailbox owner group",
+      "memberCount": 4
+    }
+  ],
+  "byDevice": { "22222222-3333-4444-5555-666666666666": { "state": "compliant" } }
+}

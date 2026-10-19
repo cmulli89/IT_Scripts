@@ -1,19 +1,67 @@
 function Protect-Output {
     <#
     .SYNOPSIS
-        Redacts secrets and environment identifiers from text or objects.
+        Redacts secrets and environment identifiers from text, objects or files.
 
     .DESCRIPTION
-        Collects everything piped in (or passed with -InputObject), renders non-string objects with
-        Out-String -Width 4096, redacts the result as one block and emits it as a single string. A residual
-        scan then runs on the output: by default each finding becomes a warning (category, line, column and
-        length only); with -Strict any finding throws before any output or audit write.
+        Pipeline input (or -InputObject) is collected, rendered with Out-String -Width 4096 (or, with -As Json,
+        ConvertTo-Json -Depth 100 and the JSON handler), redacted as one block and emitted as a single string.
 
-        -WhatIf runs the engine in memory, writes per-category counts to the host and emits no text and no
-        audit row. Matched values are never written to any stream or to the audit log. Alias: redact.
+        -Path (wildcards) and -LiteralPath redact files with the handler for their type (json, jsonl, csv, tsv, xml,
+        keyvalue, reg, script, html, text), keeping encoding, BOM and each line's own terminator. A folder is
+        processed file by file (-Recurse, -Include); binary files, *.redacted.* files and links are skipped. The
+        output is <base>.redacted<ext> next to the input, or under -OutDir; the input is never modified, an
+        existing output needs -Force, and text files above -LargeFileThresholdMB stream in chunks.
+
+        A residual scan runs on every result: by default each finding becomes a warning (category, line, column
+        and length only); with -Strict any finding throws before anything is written. -WhatIf runs the engine in
+        memory, writes counts to the host and writes no output and no audit row. Matched values are never written
+        to any stream or to the audit log. Alias: redact.
 
     .PARAMETER InputObject
         Text or objects to redact; accepts pipeline input. Strings are joined with newlines.
+
+    .PARAMETER Path
+        File or folder to redact; wildcards allowed.
+
+    .PARAMETER LiteralPath
+        File or folder to redact, taken literally.
+
+    .PARAMETER As
+        How pipeline objects are rendered: Text (default, Out-String) or Json (ConvertTo-Json, structure-aware).
+
+    .PARAMETER Recurse
+        Include subfolders when a folder is given.
+
+    .PARAMETER Include
+        Name patterns for files found in a folder (default all files).
+
+    .PARAMETER OutDir
+        Folder for output files (the folder structure below a given folder is kept).
+
+    .PARAMETER OutFile
+        Output file for a single input file.
+
+    .PARAMETER Force
+        Overwrite an existing output file.
+
+    .PARAMETER PassThru
+        Emit one RedactOutput.Result per file (Path, OutPath, DetectedType, Encoding, Counts, ResidualWarnings).
+
+    .PARAMETER Encoding
+        Forces the encoding for reading and writing a file (UTF8, Unicode, BigEndianUnicode, UTF32,
+        BigEndianUTF32, Windows1252). Needed for UTF-16 files that have no BOM.
+
+    .PARAMETER Head
+        Keep the first N lines of line-oriented input and mark the rest as omitted. Ignored, with a warning, for
+        json, csv, tsv, xml and reg.
+
+    .PARAMETER Tail
+        Keep the last M lines of line-oriented input and mark the rest as omitted. Ignored, with a warning, for
+        json, csv, tsv, xml and reg.
+
+    .PARAMETER LargeFileThresholdMB
+        Text files larger than this many MB are redacted in chunks instead of in memory (default 50).
 
     .PARAMETER ConfigPath
         Extra JSON config file layered above the local config.
@@ -31,19 +79,35 @@ function Protect-Output {
         Get-Content .\app.env | redact
 
     .EXAMPLE
-        Get-Something | Protect-Output -Strict -AuditPath .\audit.csv
+        Get-Something | Protect-Output -As Json -Strict -AuditPath .\audit.csv
 
     .EXAMPLE
-        'password=example' | Protect-Output -WhatIf
+        redact -Path .\dump.json -PassThru
+
+    .EXAMPLE
+        redact -Path .\logs -Recurse -Include *.log,*.json -OutDir .\redacted -WhatIf
 
     .OUTPUTS
-        System.String
+        System.String for pipeline input; RedactOutput.Result with -PassThru for files.
     #>
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'WhatIf reports per-category counts to the host; counts only, never values.')]
-    [CmdletBinding(SupportsShouldProcess)]
+    [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Pipeline')]
     [OutputType([string])]
+    [OutputType('RedactOutput.Result')]
     param(
-        [Parameter(ValueFromPipeline)][AllowNull()][object]$InputObject,
+        [Parameter(ValueFromPipeline, ParameterSetName = 'Pipeline')][AllowNull()][object]$InputObject,
+        [Parameter(Mandatory, Position = 0, ParameterSetName = 'Path')][string[]]$Path,
+        [Parameter(Mandatory, ParameterSetName = 'LiteralPath')][Alias('PSPath')][string[]]$LiteralPath,
+        [Parameter(ParameterSetName = 'Pipeline')][ValidateSet('Text', 'Json')][string]$As = 'Text',
+        [switch]$Recurse,
+        [string[]]$Include = '*',
+        [string]$OutDir,
+        [string]$OutFile,
+        [switch]$Force,
+        [switch]$PassThru,
+        [ValidateSet('UTF8', 'Unicode', 'BigEndianUnicode', 'UTF32', 'BigEndianUTF32', 'Windows1252')][string]$Encoding,
+        [ValidateRange(1, [int]::MaxValue)][int]$Head,
+        [ValidateRange(1, [int]::MaxValue)][int]$Tail,
+        [ValidateRange(0, [int]::MaxValue)][int]$LargeFileThresholdMB = 50,
         [string]$ConfigPath,
         [switch]$Strict,
         [switch]$NoAudit,
@@ -55,25 +119,38 @@ function Protect-Output {
     process { if ($null -ne $InputObject) { $items.Add($InputObject) } }
 
     end {
-        if ($items.Count -eq 0) { return }
-        $text = if (@($items | Where-Object { $_ -isnot [string] }).Count -eq 0) { $items -join "`n" }
-        else { ($items | Out-String -Width 4096).TrimEnd() }
-
+        $fileMode = $PSCmdlet.ParameterSetName -ne 'Pipeline'
+        if (-not $fileMode -and $items.Count -eq 0) { return }
         $session = New-RedactSession -Config (Get-RedactConfig -ConfigPath $ConfigPath)
-        $redacted = Invoke-RedactText -Text $text -Session $session
-        [void](Find-RedactResidual -Text $redacted -Session $session)
 
-        if ($Strict -and $session.Findings.Count -gt 0) {
-            $categories = ($session.Findings.Category | Sort-Object -Unique) -join ', '
-            $PSCmdlet.ThrowTerminatingError((Get-RedactErrorRecord -ErrorId 'RedactOutput.StrictResidual' -Message "-Strict: $($session.Findings.Count) residual finding(s) in: $categories. Nothing was written."))
+        if ($fileMode) {
+            $plan = Get-RedactFilePlan -Path $Path -LiteralPath $LiteralPath -Recurse:$Recurse -Include $Include -OutDir $OutDir -OutFile $OutFile
+            if ($plan.Count -eq 0) { Write-Warning 'No input files found.' }
+            # Raised here, not in a helper: one terminating error for the whole run, before any file is written.
+            $existing = @($plan.Where({ Test-Path -LiteralPath $_.OutPath }))
+            if ($existing.Count -gt 0 -and -not $Force) {
+                $PSCmdlet.ThrowTerminatingError((Get-RedactErrorRecord -ErrorId 'RedactOutput.OutputExists' -Category ResourceExists -Message "$($existing.Count) output file(s) already exist (first: '$($existing[0].Relative)'). Use -Force to overwrite."))
+            }
+            $fileOption = @{ Encoding = $Encoding; Head = $Head; Tail = $Tail; LargeFileThresholdMB = $LargeFileThresholdMB; Strict = $Strict; NoAudit = $NoAudit; AuditPath = $AuditPath }
+            foreach ($entry in $plan) {
+                $result = Invoke-RedactFile -Entry $entry -Session $session -SkipBinary:($entry.Folder -or $plan.Count -gt 1) @fileOption
+                if ($PassThru -and $result) { $result }
+            }
+            return
         }
-        foreach ($finding in $session.Findings) { Write-RedactFinding -Finding $finding }
+
+        $type = if ($As -eq 'Json') { 'json' } else { 'text' }
+        $text = if ($As -eq 'Json') { ConvertTo-Json -InputObject $(if ($items.Count -eq 1) { $items[0] } else { $items.ToArray() }) -Depth 100 }
+        elseif (@($items | Where-Object { $_ -isnot [string] }).Count -eq 0) { $items -join "`n" }
+        else { ($items | Out-String -Width 4096).TrimEnd() }
+        $text = Select-RedactLine -Text $text -Type $type -Head $Head -Tail $Tail
+
+        $redacted = Invoke-RedactContent -Text $text -Type $type -Session $session
+        [void](Find-RedactResidual -Text $redacted -Session $session)
+        Confirm-RedactFinding -Session $session -Strict:$Strict
 
         if (-not $PSCmdlet.ShouldProcess('redaction result', 'Emit redacted text and write audit row')) {
-            foreach ($label in $session.Counts.Keys) {
-                if ($session.Counts[$label] -gt 0) { Write-Host "${label}: $($session.Counts[$label])" }
-            }
-            Write-Host "residual findings: $($session.Findings.Count)"
+            Write-RedactSummary -Session $session
             return
         }
         if (-not $NoAudit) {
