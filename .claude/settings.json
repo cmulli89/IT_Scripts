@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./RedactOutput/config/redact.config.local.json)",
+      "Read(**/*.redactmap.json)",
+      "Read(**/audit*.csv)"
+    ]
+  }
+}

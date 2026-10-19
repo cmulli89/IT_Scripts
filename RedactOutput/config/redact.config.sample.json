@@ -1,0 +1,9 @@
+{
+  "_comment": "Committed sample: placeholders and comments only. Copy your real values into redact.config.local.json (git-ignored). Keys starting with an underscore are ignored.",
+  "secretNames": [],
+  "_secretNames_comment": "Extra key/property names whose values are secrets (S04), added to the built-in list. Example: [\"badge_pin\"].",
+  "nonSecretNames": [],
+  "_nonSecretNames_comment": "Names that contain a secret-like word but are not secret (S04 deny-list), added to the built-in list. Compared case-insensitively on the exact name. Example: [\"KeyRotationDays\"].",
+  "categories": {},
+  "_categories_comment": "Per-category on/off switches, merged key by key over lower layers. Secret categories cannot be disabled."
+}

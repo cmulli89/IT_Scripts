@@ -1,0 +1,3 @@
+# One GUID per line to keep verbatim (Intune setting-definition IDs, CSP and ADMX GUIDs).
+# Blank lines and lines starting with # are ignored.
+# Tenant, subscription, object and device IDs must never be listed here.
