@@ -295,6 +295,82 @@ function Invoke-RedactText {
 
 #endregion
 
+#region Wrapped list entries
+
+# Console-width wrapping of Format-List output: a long value continues on lines indented to the value column, so
+# neither half matches a rule. These are the pieces of the re-join: the cheap pre-check, the entry head and the width.
+$script:WrapWidth = 79
+$script:WrapCandidate = "(?m)^[^\r\n]{$script:WrapWidth,}(?:\r\n|\n|\r)[ ]+[^ \t\r\n]"
+$script:WrapEntry = '^[A-Za-z0-9_.-][A-Za-z0-9_. -]*: (?=[^ \t])'
+
+function Join-RedactWrappedLine {
+    <#
+    .SYNOPSIS
+        Re-joins Format-List values that were wrapped at console width.
+    .DESCRIPTION
+        A line "<name><spaces>: <value>" fixes the value column V. The next line is a continuation when it starts with
+        exactly V spaces and then a non-space, and the previous physical line (entry or earlier continuation) is at
+        least 79 characters long, i.e. it reached the console width. Continuations are appended without their indent
+        (PowerShell inserts nothing when it wraps), chains included; the joined line keeps the last line's terminator.
+        Only the number of joined lines is reported (verbose).
+    .PARAMETER Text
+        Text-mode input (pipeline, clipboard, command output, text, log and script files).
+    .EXAMPLE
+        Join-RedactWrappedLine -Text $text
+    .OUTPUTS
+        System.String
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowEmptyString()][Parameter(Mandatory)][string]$Text)
+
+    if (-not (Get-RedactRegex -Pattern $script:WrapCandidate).IsMatch($Text)) { return $Text }
+    $entry = Get-RedactRegex -Pattern $script:WrapEntry
+    $lines = [System.Collections.Generic.List[object]]::new()
+    $indent = $null
+    $previousLength = 0
+    $joined = 0
+    foreach ($l in (Split-RedactLine -Text $Text)) {
+        $line = $l.Line
+        if ($indent -and $previousLength -ge $script:WrapWidth -and $line.Length -gt $indent.Length -and $line.StartsWith($indent, [StringComparison]::Ordinal) -and $line[$indent.Length] -notin ' ', "`t") {
+            $lines[$lines.Count - 1].Line += $line.Substring($indent.Length)
+            $lines[$lines.Count - 1].Eol = $l.Eol
+            $joined++
+        }
+        else {
+            $lines.Add($l)
+            $head = $entry.Match($line)
+            $indent = if ($head.Success) { ' ' * $head.Length }
+        }
+        $previousLength = $line.Length
+    }
+    if ($joined -gt 0) { Write-Verbose "Joined $joined wrapped continuation line(s)." }
+    Join-RedactLine -Line $lines
+}
+
+function Get-RedactOpenWrapStart {
+    # For chunked reading: text that ends on a line terminator may end inside a wrapped entry whose next line is not read
+    # yet. Returns the offset of that entry (so the chunk can stop before it), else the text length. Walks back over
+    # indented lines that reached the console width up to a list entry; a chain is a handful of lines, so the walk is capped.
+    [CmdletBinding()]
+    [OutputType([int])]
+    param([Parameter(Mandatory)][string]$Text)
+
+    $entry = Get-RedactRegex -Pattern $script:WrapEntry
+    $end = $Text.Length
+    for ($i = 0; $i -lt 64 -and $end -gt 0; $i++) {
+        $start = if ($end -ge 2) { $Text.LastIndexOf([char]10, $end - 2) + 1 } else { 0 }
+        $line = $Text.Substring($start, $end - $start).TrimEnd("`r", "`n")
+        if ($line.Length -lt $script:WrapWidth) { break }
+        if ($entry.IsMatch($line)) { return $start }
+        if ($line[0] -ne ' ') { break }
+        $end = $start
+    }
+    $Text.Length
+}
+
+#endregion
+
 #region Residual scan
 
 function Get-RedactEntropy {

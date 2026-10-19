@@ -639,6 +639,80 @@ Describe '-Head, -Tail, -As Json, -WhatIf and -Strict' -Tag 'Unit' {
     }
 }
 
+Describe 'Wrapped Format-List values' -Tag 'Unit' {
+    BeforeAll {
+        $script:WrapPath = Copy-TestFixture -Name 'wrapped-list.txt'
+        # Last characters of each planted value that the wrapped halves would leak.
+        $script:WrapTail = '555555555555', 'k8Ys1Mz6Pr0Va', 'Lt3Ok8Ys1Mz6', 'F6g7H8', 'A1b2C3d4E5A1b2', 'Zk3Wm8Pq2Ld7'
+        function Assert-WrapOutput {
+            param([Parameter(Mandatory)][string]$Out)
+            foreach ($tail in $script:WrapTail) { $Out.Contains($tail) | Should -BeFalse -Because 'a wrapped tail must not leak' }
+            $lines = $Out -split "`r?`n"
+            $lines[0] | Should -BeExactly 'Key              : HKEY_CURRENT_USER\SOFTWARE\Example\{[guid-01]}'
+            $lines[1] | Should -BeExactly 'ClientSecret     : [secret:kv]'
+            $lines[2] | Should -BeExactly 'ConnectionString : [secret:kv]'
+            $lines[3] | Should -BeExactly 'Description      : First line of a short description'
+            $lines[4] | Should -BeExactly '                   second short line that is not a wrapped value'
+            $lines[5] | Should -BeExactly 'Name             : ExamplePackage'
+        }
+    }
+
+    It 'joins wrapped values from pipeline text, reports only a count, and is idempotent' {
+        $text = Get-Content -LiteralPath $script:WrapPath -Raw
+        $records = @($text | Protect-Output -NoAudit -WarningAction SilentlyContinue -Verbose 4>&1)
+        $out = ($records.Where({ $_ -is [string] })) -join "`n"
+        Assert-WrapOutput -Out $out
+        @($records.Where({ $_ -is [System.Management.Automation.VerboseRecord] -and $_.Message -like 'Joined*' }).Message) | Should -BeExactly 'Joined 6 wrapped continuation line(s).'
+        ($out | Protect-Output -NoAudit -WarningAction SilentlyContinue) -ceq $out | Should -BeTrue
+    }
+
+    It 'joins them in file mode and keeps CRLF' {
+        $crlf = Join-Path $script:In 'wrapped-crlf.log'
+        [System.IO.File]::WriteAllText($crlf, ((Get-Content -LiteralPath $script:WrapPath -Raw) -replace "`n", "`r`n"))
+        $out = Read-TestText -Path (Invoke-TestFile -Path $crlf).OutPath
+        Assert-WrapOutput -Out $out
+        ($out -split "`n").Where({ $_ -ne '' -and -not $_.EndsWith("`r") }).Count | Should -Be 0
+        Assert-WrapOutput -Out (Read-TestText -Path (Invoke-TestFile -Path $script:WrapPath).OutPath)
+    }
+
+    It 'joins them in command output' {
+        $path = $script:WrapPath
+        Assert-WrapOutput -Out (Invoke-RedactedCommand -ScriptBlock { Get-Content -LiteralPath $path } -NoAudit -WarningAction SilentlyContinue)
+    }
+
+    It 'joins only at the exact indent, after a full-width line, and only in text types' {
+        InModuleScope RedactOutput {
+            $wide = 'Name  : ' + ('a' * 72)
+            Join-RedactWrappedLine -Text "$wide`n        tail`n" | Should -BeExactly "$($wide)tail`n"
+            $full = 'b' * 71
+            Join-RedactWrappedLine -Text "$wide`n        $full`n        t2" | Should -BeExactly "$wide$($full)t2"
+            Join-RedactWrappedLine -Text "$wide`n        t1`n        t2" | Should -BeExactly "$($wide)t1`n        t2"
+            foreach ($text in "$wide`n       tail", "$wide`n         tail", "$wide`n        ", "Name  : $('a' * 60)`n        tail") {
+                Join-RedactWrappedLine -Text $text | Should -BeExactly $text
+            }
+            $session = New-RedactSession -Config (Get-RedactConfig)
+            $kv = Invoke-RedactContent -Text "$wide`n        tail" -Type keyvalue -Session $session
+            $kv.Split("`n").Count | Should -Be 2
+        }
+    }
+
+    It 'never splits a wrapped entry across a chunk boundary in the large-file path' {
+        $filler = '2026-01-15 10:00:00 INFO heartbeat ok' + "`n"
+        $count = [int][math]::Floor((1MB - 100) / $filler.Length)
+        $first = 'Qm4Zr8Xv2L' * 6
+        $second = 'Tail9Zx3Kq7Vw2Mb8Rn4Ys6Dj1Hf5Pc0Lg'
+        $text = ($filler * $count) + 'ClientSecret     : ' + $first + "`n" + (' ' * 19) + $second + "`n"
+        $path = Join-Path $script:In 'wrapped-big.log'
+        [System.IO.File]::WriteAllText($path, $text)
+        $memory = Invoke-TestFile -Path $path -Extra @{ OutFile = (Join-Path $script:In 'wrapped-memory.log') }
+        $stream = Invoke-TestFile -Path $path -Extra @{ OutFile = (Join-Path $script:In 'wrapped-stream.log'); LargeFileThresholdMB = 0 }
+        $out = Read-TestText -Path $stream.OutPath
+        $out.Contains('Zx3Kq7Vw2Mb8') | Should -BeFalse -Because 'the continuation must be joined across the chunk edge'
+        $out.EndsWith("ClientSecret     : [secret:kv]`n") | Should -BeTrue
+        (Get-FileHash -LiteralPath $stream.OutPath).Hash | Should -Be (Get-FileHash -LiteralPath $memory.OutPath).Hash
+    }
+}
+
 Describe 'Large-file path' -Tag 'Unit' {
     It 'gives the same output and counts as the in-memory path for a small file' {
         $path = Join-Path $script:In 'pem-small.log'

@@ -136,6 +136,31 @@ Describe 'S04 secret-named key/value' -Tag 'Unit' {
         (Invoke-TestRedact -Text $text) -ceq $text | Should -BeTrue
     }
 
+    It 'treats the bare name Key as a non-secret name (registry Format-List) and still tokenizes the GUID' {
+        $out = Invoke-TestRedact -Text 'Key : HKEY_LOCAL_MACHINE\SOFTWARE\Example\{11111111-2222-3333-4444-555555555555}'
+        $out | Should -BeExactly 'Key : HKEY_LOCAL_MACHINE\SOFTWARE\Example\{[guid-01]}'
+    }
+
+    It 'still redacts every longer name that contains key' {
+        $names = 'ApiKey', 'AccessKey', 'AccountKey', 'client_key', 'SecretKey', 'KEY_FILE'
+        foreach ($name in $names) {
+            foreach ($separator in ' : ', '=') {
+                $out = Invoke-TestRedact -Text "$name$($separator)FakeValue16"
+                $out.Contains('FakeValue16') | Should -BeFalse -Because "$name must stay a secret name"
+            }
+        }
+    }
+
+    It 'no longer redacts an XML attribute named key, and a bare key= line is left to the S17 residual scan' {
+        $xml = '<add key="Setting" value="x"/>'
+        (Invoke-TestRedact -Text $xml) -ceq $xml | Should -BeTrue
+        $line = 'key=' + 'k9Zq3XvB7mT2wLp8Rj5HcN1yD6sGa4UfE0Qw7Xe2'
+        (Invoke-TestRedact -Text $line) -ceq $line | Should -BeTrue
+        $f = @($line | Test-RedactionResidual)
+        $f.Count | Should -Be 1
+        $f[0].Category | Should -Be 'high-entropy'
+    }
+
     It 'extends the deny-list and name list from config, case-insensitively' {
         $cfg = Write-TestConfig -Data @{ nonSecretNames = @('MyKeyName'); secretNames = @('badge_pin') }
         $out = Invoke-TestRedact -ConfigPath $cfg -Text "mykeyname=visible`nBADGE_PIN=FakeValue14`nMyKeyOther=FakeValue15"

@@ -60,6 +60,11 @@ redact -Path .\logs -Recurse -Include *.log,*.json  # folder
 Invoke-RedactedCommand { gpresult /r } -Clipboard   # run, capture all streams (errors too), redact
 ```
 
+Tip: pipe objects straight to `redact`; they are rendered at width 4096, so nothing wraps. For text captured
+elsewhere, render it at full width on the source side (`... | Out-String -Width 4096`). The module re-joins wrapped
+Format-List values (text input and .txt/.log/script files), but it cannot re-join wrapped Format-Table cells, so avoid
+table-format captures.
+
 Useful switches: `-Preview` (show, write nothing), `-WhatIf` (run the engine, report counts, write nothing),
 `-OutDir`, `-Force`, `-PassThru`, `-Head`/`-Tail`, `-As Json`, `-ConfigPath`. Files are never modified; the output is
 `<name>.redacted<ext>` next to the input or under `-OutDir`.
@@ -106,13 +111,14 @@ findings, strict. Never values. `Test-RedactionResidual` rescans text or a file 
 
 | Type | Handling |
 |---|---|
-| .txt .log .out, unknown text | whole-text pass, then line-based |
+| .txt .log .out, unknown text | wrapped Format-List values re-joined, then whole-text pass, then line-based |
 | .json, .jsonl | structure-aware; secret-named properties replaced; output still parses |
 | .csv .tsv | quote-aware; header and quoting kept byte for byte |
 | .xml .wsb | text mode; secret-named elements and attributes; stays well-formed |
 | .env .ini .conf .properties .yaml .yml | `KEY=value` and `key: value`; quotes and comments kept |
 | .reg | UTF-16LE BOM and CRLF kept; `hex:` payloads scanned |
-| .ps1 .psm1 .psd1 .sh .py, .html | text mode |
+| .ps1 .psm1 .psd1 .sh .py | text mode (wrapped Format-List values re-joined) |
+| .html | text mode |
 | binary (.zip .evtx .xlsx .docx .pdf, images) | refused with a hint; skipped in folder mode |
 
 Encoding, BOM and each line's own line ending are kept. A UTF-16 file without a BOM needs `-Encoding Unicode`.

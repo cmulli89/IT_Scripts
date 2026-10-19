@@ -1,5 +1,5 @@
 # Large-file path for text-mode files: ~1 MB chunks on line boundaries, one session for the whole file (tokens stay
-# consistent), engine and residual scan once per chunk. A private key that spans a chunk edge is kept whole.
+# consistent), engine and residual scan once per chunk. A private key or a wrapped list entry that spans a chunk edge is kept whole.
 
 function Test-RedactOpenPem {
     # True when the text has more BEGIN ... PRIVATE KEY lines than END lines.
@@ -18,7 +18,8 @@ function Invoke-RedactStream {
     .SYNOPSIS
         Redacts a large text file chunk by chunk and replaces Session.Findings with the findings of the whole file.
     .DESCRIPTION
-        Chunks end on a line terminator (so CRLF is never split) and are extended while a private key is open.
+        Chunks end on a line terminator (so CRLF is never split) and are extended while a private key is open;
+        a wrapped list entry that may continue in the next chunk is held back for it (Get-RedactOpenWrapStart).
         Residual line numbers are offset by the lines already written. Output goes to OutputPath, which is
         left empty-handed (no file) when it is not given.
     .PARAMETER InputPath
@@ -52,9 +53,11 @@ function Invoke-RedactStream {
             [void]$pending.Append($buffer, 0, $n)
             $text = $pending.ToString()
             $cut = if ($n -eq 0) { $text.Length } else { $text.LastIndexOf("`n") + 1 }
-            if ($cut -eq 0 -or ($n -gt 0 -and (Test-RedactOpenPem -Text $text.Substring(0, $cut)))) { continue }
-            [void]$pending.Clear().Append($text.Substring($cut))
-            $redacted = Invoke-RedactText -Text $text.Substring(0, $cut) -Session $Session
+            $chunk = $text.Substring(0, $cut)
+            if ($n -gt 0) { $chunk = $chunk.Substring(0, (Get-RedactOpenWrapStart -Text $chunk)) }
+            if ($chunk.Length -eq 0 -or ($n -gt 0 -and (Test-RedactOpenPem -Text $chunk))) { continue }
+            [void]$pending.Clear().Append($text.Substring($chunk.Length))
+            $redacted = Invoke-RedactContent -Text $chunk -Type text -Session $Session
             [void](Find-RedactResidual -Text $redacted -Session $Session)
             foreach ($f in $Session.Findings) {
                 $findings.Add([pscustomobject]@{ Category = $f.Category; Line = $f.Line + $lineOffset; Column = $f.Column; Length = $f.Length })

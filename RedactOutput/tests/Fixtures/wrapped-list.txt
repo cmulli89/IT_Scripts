@@ -1,0 +1,12 @@
+Key              : HKEY_CURRENT_USER\SOFTWARE\Example\{11111111-2222-3333-4444-5
+                   55555555555}
+ClientSecret     : Fx7qR2mVb9LzT4wKp8NcY3hJd6SgA1eUo5XiB0tQzW9rE2yM7kLp4VnC8bHs3
+                   JdF6gTa1UxO5iQ0Zk3Wm8Pq2Ld7Vn4Xc9Rb5Ty1Hj6Gs0AfQe4Nu7Bw2Ci9Dx
+                   5Lt3Ok8Ys1Mz6Pr0Va
+ConnectionString : DefaultEndpointsProtocol=https;AccountName=fakeacct;AccountKe
+                   y=A1b2C3d4E5A1b2C3d4E5A1b2C3d4E5A1b2C3d4E5A1b2C3d4E5A1b2C3d4E
+                   5A1b2C3d4E5A1b2C3d4E5F6g7H8==;EndpointSuffix=core.usgovclouda
+                   pi.net
+Description      : First line of a short description
+                   second short line that is not a wrapped value
+Name             : ExamplePackage

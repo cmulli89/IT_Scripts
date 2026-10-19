@@ -9,8 +9,9 @@ $script:GUID = '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9
 
 # S04 name fragment (any name containing one of these) and the built-in deny-list.
 $script:SecretNameBase = 'key|secret|token|passw(?:or)?d|pwd|credential|apikey|connectionstring|sas|signature|client_id|tenant'
+# 'Key' alone is exact-match only (registry Format-List output names a path 'Key'); ApiKey, SecretKey, KEY_FILE etc. stay secret names.
 $script:NonSecretNameSeed = @(
-    'KeyVaultName', 'KeyName', 'KeyId', 'KeyUsage', 'KeyType', 'KeyLength', 'KeySize', 'KeyboardLayout',
+    'Key', 'KeyVaultName', 'KeyName', 'KeyId', 'KeyUsage', 'KeyType', 'KeyLength', 'KeySize', 'KeyboardLayout',
     'PublicKeyToken', 'RegistryKey', 'PasswordLastSet', 'PasswordNeverExpires', 'PasswordExpired',
     'PasswordNotRequired', 'PasswordPolicy', 'TokenLifetime', 'TokenType', 'SasUrlSupported',
     'ms-Mcs-AdmPwdExpirationTime', 'msLAPS-PasswordExpirationTime'

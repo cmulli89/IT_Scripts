@@ -79,7 +79,7 @@ function Invoke-RedactContent {
         Redacts text with the handler for its file type.
     .DESCRIPTION
         json, jsonl, csv, tsv, xml, keyvalue, reg and html have their own handler; text and script use the
-        plain engine. A handler that cannot parse its input returns $null and the text is redacted as plain
+        plain engine, after wrapped Format-List values are re-joined (Join-RedactWrappedLine). A handler that cannot parse its input returns $null and the text is redacted as plain
         text with a warning that names the type, never the content.
     .PARAMETER Text
         Text to redact.
@@ -101,6 +101,7 @@ function Invoke-RedactContent {
     )
 
     if ([string]::IsNullOrEmpty($Text)) { return '' }
+    if ($Type -in 'text', 'script') { $Text = Join-RedactWrappedLine -Text $Text }
     $result = switch ($Type) {
         'json' { Invoke-RedactJson -Text $Text -Session $Session }
         'jsonl' { Invoke-RedactJsonLine -Text $Text -Session $Session }
