@@ -1,12 +1,21 @@
 # Audit CSV and the single place where findings become warnings. Neither ever receives matched text.
 
+function Get-RedactDataFolder {
+    # Per-user data folder shared by the audit CSV and the default map folder.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    if ($IsWindows) { Join-Path $env:LOCALAPPDATA 'RedactOutput' }
+    else { Join-Path $HOME '.local/share/RedactOutput' }
+}
+
 function Get-RedactAuditPath {
     [CmdletBinding()]
     [OutputType([string])]
     param()
 
-    if ($IsWindows) { Join-Path $env:LOCALAPPDATA 'RedactOutput/audit.csv' }
-    else { Join-Path $HOME '.local/share/RedactOutput/audit.csv' }
+    Join-Path (Get-RedactDataFolder) 'audit.csv'
 }
 
 function Get-RedactSha256 {

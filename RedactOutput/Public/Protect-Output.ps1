@@ -15,7 +15,13 @@ function Protect-Output {
 
         A residual scan runs on every result: by default each finding becomes a warning (category, line, column
         and length only); with -Strict any finding throws before anything is written. -WhatIf runs the engine in
-        memory, writes counts to the host and writes no output and no audit row. Matched values are never written
+        memory, writes counts to the host and writes no output, map or audit row.
+
+        -MapPath saves the original-to-token pairs (never secrets) as JSON for Restore-RedactedText, after a
+        successful run only. The file is created owner-only (Windows ACL, Linux/macOS mode 600) before anything
+        is written, and a bare file name goes to the per-user maps folder. An existing map is loaded first, so
+        numbering continues and existing entries are kept. The map holds original values: keep it local, never in
+        a synced folder (a warning is given), and never share it. Matched values are never written
         to any stream or to the audit log. Alias: redact.
 
     .PARAMETER InputObject
@@ -69,6 +75,10 @@ function Protect-Output {
     .PARAMETER Strict
         Throw a terminating error, before any output or audit write, if the residual scan finds anything.
 
+    .PARAMETER MapPath
+        Map file to save (and reuse when it exists). A bare file name is created under
+        %LOCALAPPDATA%\RedactOutput\maps (Linux/macOS: ~/.local/share/RedactOutput/maps).
+
     .PARAMETER NoAudit
         Do not append an audit row.
 
@@ -80,6 +90,9 @@ function Protect-Output {
 
     .EXAMPLE
         Get-Something | Protect-Output -As Json -Strict -AuditPath .\audit.csv
+
+    .EXAMPLE
+        Get-Something | redact -MapPath .\session1.redactmap.json
 
     .EXAMPLE
         redact -Path .\dump.json -PassThru
@@ -109,6 +122,7 @@ function Protect-Output {
         [ValidateRange(1, [int]::MaxValue)][int]$Tail,
         [ValidateRange(0, [int]::MaxValue)][int]$LargeFileThresholdMB = 50,
         [string]$ConfigPath,
+        [string]$MapPath,
         [switch]$Strict,
         [switch]$NoAudit,
         [string]$AuditPath
@@ -122,11 +136,14 @@ function Protect-Output {
         $fileMode = $PSCmdlet.ParameterSetName -ne 'Pipeline'
         if (-not $fileMode -and $items.Count -eq 0) { return }
         $session = New-RedactSession -Config (Get-RedactConfig -ConfigPath $ConfigPath)
+        $mapFile = if ($MapPath) { Resolve-RedactMapPath -MapPath $MapPath }
+        if ($mapFile -and (Test-Path -LiteralPath $mapFile)) { Import-RedactMap -Session $session -Path $mapFile }
 
         if ($fileMode) {
             $plan = Get-RedactFilePlan -Path $Path -LiteralPath $LiteralPath -Recurse:$Recurse -Include $Include -OutDir $OutDir -OutFile $OutFile
             if ($plan.Count -eq 0) { Write-Warning 'No input files found.' }
-            # Raised here, not in a helper: one terminating error for the whole run, before any file is written.
+            # One terminating error for the whole run, before any file is written. ThrowTerminatingError (not throw) so -ErrorVariable
+            # holds exactly one entry; its message is in .Message and .ErrorRecord.Exception.Message ($e[0] is the wrapping exception).
             $existing = @($plan.Where({ Test-Path -LiteralPath $_.OutPath }))
             if ($existing.Count -gt 0 -and -not $Force) {
                 $PSCmdlet.ThrowTerminatingError((Get-RedactErrorRecord -ErrorId 'RedactOutput.OutputExists' -Category ResourceExists -Message "$($existing.Count) output file(s) already exist (first: '$($existing[0].Relative)'). Use -Force to overwrite."))
@@ -136,6 +153,7 @@ function Protect-Output {
                 $result = Invoke-RedactFile -Entry $entry -Session $session -SkipBinary:($entry.Folder -or $plan.Count -gt 1) @fileOption
                 if ($PassThru -and $result) { $result }
             }
+            if ($mapFile -and $PSCmdlet.ShouldProcess($mapFile, 'Write map file')) { Save-RedactMap -Session $session -Path $mapFile }
             return
         }
 
@@ -153,6 +171,7 @@ function Protect-Output {
             Write-RedactSummary -Session $session
             return
         }
+        if ($mapFile -and $PSCmdlet.ShouldProcess($mapFile, 'Write map file')) { Save-RedactMap -Session $session -Path $mapFile }
         if (-not $NoAudit) {
             Write-RedactAudit -Session $session -InputSource pipeline -InputSha256 (Get-RedactSha256 -Text $text) -Strict:$Strict -AuditPath $AuditPath
         }

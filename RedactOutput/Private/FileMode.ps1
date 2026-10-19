@@ -30,6 +30,18 @@ function Get-RedactRealPath {
     if ($target) { $target.FullName } else { $full }
 }
 
+function Test-RedactSamePath {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][string]$Left,
+        [Parameter(Mandatory)][string]$Right
+    )
+
+    $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    [string]::Equals((Get-RedactRealPath -Path $Left), (Get-RedactRealPath -Path $Right), $comparison)
+}
+
 function Resolve-RedactOutputPath {
     # <base>.redacted<ext> next to the input, or under -OutDir (keeping the folder structure); -OutFile names it outright.
     # Refuses an output that resolves to the input.
@@ -50,8 +62,7 @@ function Resolve-RedactOutputPath {
         [System.IO.Path]::Combine($folder, $name)
     }
     $out = $provider.GetUnresolvedProviderPathFromPSPath($out)
-    $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
-    if ([string]::Equals((Get-RedactRealPath -Path $out), (Get-RedactRealPath -Path $in), $comparison)) {
+    if (Test-RedactSamePath -Left $out -Right $in) {
         throw (Get-RedactErrorRecord -ErrorId 'RedactOutput.OutputIsInput' -Message "The output path for '$($Entry.Relative)' is the input file; the input is never modified.")
     }
     $out

@@ -27,4 +27,4 @@ foreach ($scope in 'Private', 'Public') {
 
 Set-Alias -Name redact -Value Protect-Output
 
-Export-ModuleMember -Function Protect-Output, Test-RedactionResidual -Alias redact
+Export-ModuleMember -Function Protect-Output, Test-RedactionResidual, Restore-RedactedText, Get-RedactionMap -Alias redact

@@ -8,7 +8,9 @@
     CompatiblePSEditions  = @('Core')
     FunctionsToExport     = @(
         'Protect-Output',
-        'Test-RedactionResidual'
+        'Test-RedactionResidual',
+        'Restore-RedactedText',
+        'Get-RedactionMap'
     )
     CmdletsToExport       = @()
     VariablesToExport     = @()

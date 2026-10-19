@@ -497,6 +497,20 @@ Describe 'Output safety and folder mode' -Tag 'Unit' {
             @(Get-ChildItem -LiteralPath $script:Exist -Recurse -Force -File | ForEach-Object { "$($_.FullName)|$($_.Length)" } | Sort-Object) | Should -Be $before
         }
 
+        It 'carries a non-empty, value-free message in the recorded error' {
+            $ErrorActionPreference = 'Continue'
+            $errors = $null
+            Push-Location -LiteralPath $script:Exist
+            try { Protect-Output -Path . -Recurse -NoAudit -ErrorVariable errors 2>$null 3>$null } catch { $null = $_ }
+            finally { Pop-Location }
+            @($errors).Count | Should -Be 1
+            # For a terminating error ErrorVariable holds the wrapping exception, whose .Exception is empty by design.
+            $pattern = "^3 output file\(s\) already exist \(first: '[^']+'\)\. Use -Force to overwrite\.$"
+            $errors[0].Message | Should -Match $pattern
+            $errors[0].ErrorRecord.Exception.Message | Should -Match $pattern
+            $errors[0].ErrorRecord.Exception.Message.Contains('WS-1234') | Should -BeFalse
+        }
+
         It 'overwrites the outputs with -Force and reports no errors' {
             $ErrorActionPreference = 'Continue'
             $errors = $null
